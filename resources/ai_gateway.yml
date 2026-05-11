@@ -1,0 +1,17 @@
+# AI Gateway route configuration reference
+#
+# The care-gap-advisor route is created programmatically by setup/05_configure_ai_gateway.py
+# during the bootstrap workflow. It cannot be declared as a DAB resource because it
+# requires a secret scope to be configured first.
+#
+# To manually create the route, run:
+#   databricks bundle run bootstrap_workflow --select-tasks configure_ai_gateway
+#
+# Route spec (for reference):
+#   name:     care-gap-advisor
+#   model:    claude-3-5-sonnet-20241022 (Anthropic via AI Gateway)
+#   task:     llm/v1/chat
+#   secret:   secrets/<scope>/anthropic-api-key
+#
+# Once created, the route name is stored in:
+#   icd10_gap_demo.app_config.bootstrap_status (step = 'configure_ai_gateway')

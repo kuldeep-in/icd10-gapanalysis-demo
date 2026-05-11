@@ -1,0 +1,11 @@
+command: ["python", "app.py"]
+
+env:
+  - name: UC_CATALOG
+    value: "icd10_gap_demo"
+  - name: AI_GATEWAY_ROUTE
+    value: "care-gap-advisor"
+  - name: BOOTSTRAP_JOB_NAME
+    value: "ICD-10 Gap Demo — Bootstrap"
+  # DATABRICKS_WAREHOUSE_ID — set this to your SQL warehouse ID at deploy time:
+  #   databricks apps deploy --environment-vars DATABRICKS_WAREHOUSE_ID=<id>

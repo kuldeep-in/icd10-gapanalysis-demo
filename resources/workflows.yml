@@ -1,0 +1,72 @@
+resources:
+  jobs:
+    bootstrap_workflow:
+      name: ${var.bootstrap_job_name}
+      description: >
+        One-time setup job: creates Unity Catalog structure, ingests patient data from JSON,
+        loads ICD-10 PDFs into UC Volume, creates Knowledge Assistant, and configures AI Gateway.
+
+      job_clusters:
+        - job_cluster_key: bootstrap_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: Standard_DS3_v2
+            num_workers: 0
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*]"
+            azure_attributes:
+              availability: ON_DEMAND_AZURE
+              first_on_demand: 1
+
+      tasks:
+        - task_key: create_catalog
+          description: Create Unity Catalog, schemas, Delta tables, Volume, and care gap rules
+          job_cluster_key: bootstrap_cluster
+          notebook_task:
+            notebook_path: ../setup/01_create_catalog
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: ingest_patient_data
+          description: Load patient_records.json from the Git repo into the clinical_data.patient_records Delta table
+          depends_on:
+            - task_key: create_catalog
+          job_cluster_key: bootstrap_cluster
+          notebook_task:
+            notebook_path: ../setup/02_ingest_patient_json
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: load_icd10_pdfs
+          description: Copy ICD-10 PDF files from the data/ directory into the icd10_reference UC Volume
+          depends_on:
+            - task_key: create_catalog
+          job_cluster_key: bootstrap_cluster
+          notebook_task:
+            notebook_path: ../setup/03_load_icd10_pdfs_to_volume
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: create_knowledge_assistant
+          description: Create KA agent via SDK, attach UC Volume as knowledge source, trigger PDF sync
+          depends_on:
+            - task_key: load_icd10_pdfs
+          job_cluster_key: bootstrap_cluster
+          notebook_task:
+            notebook_path: ../setup/04_create_knowledge_assistant
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: configure_ai_gateway
+          description: Create or update the AI Gateway route for the care gap foundation model
+          depends_on:
+            - task_key: ingest_patient_data
+          job_cluster_key: bootstrap_cluster
+          notebook_task:
+            notebook_path: ../setup/05_configure_ai_gateway
+            base_parameters:
+              catalog: ${var.catalog}
+              ai_gateway_route: ${var.ai_gateway_route}
+              secret_scope: ${var.secret_scope}
+              model_provider: ${var.model_provider}
