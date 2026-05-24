@@ -21,7 +21,7 @@ resources:
 
       tasks:
         - task_key: create_catalog
-          description: Create Unity Catalog, schemas, Delta tables, Volume, and care gap rules
+          description: Create Unity Catalog, schema, all Delta tables, UC Volume, and grant app SP permissions
           environment_key: default
           notebook_task:
             notebook_path: ${workspace.file_path}/setup/01_create_catalog
@@ -30,8 +30,19 @@ resources:
               schema: ${var.schema}
               app_sp_id: ${var.app_service_principal}
 
+        - task_key: setup_care_gap_rules
+          description: Seed care_gap_rules table with HEDIS/ACC/ADA evidence-based clinical rules
+          depends_on:
+            - task_key: create_catalog
+          environment_key: default
+          notebook_task:
+            notebook_path: ${workspace.file_path}/setup/02_setup_care_gap_rules
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+
         - task_key: ingest_patient_data
-          description: Load patient_records.json via spark.read.json into clinical_data.patient_records
+          description: Load patient_records.json via spark.read.json into patient_records table
           depends_on:
             - task_key: create_catalog
           environment_key: default
@@ -42,7 +53,7 @@ resources:
               schema: ${var.schema}
 
         - task_key: load_icd10_pdfs
-          description: Copy ICD-10 PDFs via dbutils.fs.cp from Git repo into the icd10_reference UC Volume
+          description: Download ICD-10 PDFs from GitHub and stream directly into the icd10_reference UC Volume
           depends_on:
             - task_key: create_catalog
           environment_key: default
@@ -51,6 +62,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              pdf_github_url: ${var.pdf_github_url}
 
     # ── Job 2: AI Setup (Serverless) ──────────────────────────────────────────
     # Pure SDK calls — Knowledge Assistant and AI Gateway configuration.
@@ -82,6 +94,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              ka_name: ${var.ka_name}
 
         - task_key: configure_ai_gateway
           description: Create the AI Gateway serving endpoint for the care gap foundation model

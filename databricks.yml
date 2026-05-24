@@ -35,6 +35,16 @@ variables:
       Application ID (client_id UUID) of the Databricks App service principal.
       Do not hardcode — deploy.sh reads this from the live app after apps deploy.
       Pass via: databricks bundle deploy --var="app_service_principal=$(databricks apps get icd10-gap-advisor ... | jq -r .service_principal_client_id)"
+  ka_name:
+    default: "ICD-10 Clinical Reference Assistant"
+    description: Display name of the Databricks Knowledge Assistant created in setup step 4
+  pdf_github_url:
+    default: "https://github.com/kuldeep-in/icd10-gapanalysis-demo/tree/main/data/icd10_pdfs"
+    description: >
+      GitHub tree URL of the directory containing ICD-10 PDF reference files.
+      The notebook uses the GitHub Contents API to list and stream-download all PDFs
+      directly into the Unity Catalog Volume — no local storage or bundle packaging needed.
+      Format: https://github.com/<owner>/<repo>/tree/<branch>/<path>
 
 targets:
   dev:

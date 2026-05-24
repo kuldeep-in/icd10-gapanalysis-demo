@@ -17,40 +17,39 @@
 import json
 import time
 
+from databricks.sdk import WorkspaceClient
+
 dbutils.widgets.text("catalog", "my_catalog")
 dbutils.widgets.text("schema",  "icd10_care_gap")
+dbutils.widgets.text("ka_name", "ICD-10 Clinical Reference Assistant")
 
-CATALOG = dbutils.widgets.get("catalog")
-SCHEMA  = dbutils.widgets.get("schema")
-
-KA_DISPLAY_NAME = "ICD-10 Clinical Reference Assistant"
+CATALOG         = dbutils.widgets.get("catalog")
+SCHEMA          = dbutils.widgets.get("schema")
+KA_DISPLAY_NAME = dbutils.widgets.get("ka_name")
 VOLUME_PATH     = f"/Volumes/{CATALOG}/{SCHEMA}/icd10_reference_pdfs"
 
 # COMMAND ----------
 
-# Idempotency check
-existing = spark.sql(f"""
-    SELECT details FROM `{CATALOG}`.`{SCHEMA}`.bootstrap_status
-    WHERE step = 'create_knowledge_assistant' AND status = 'COMPLETED'
-    ORDER BY updated_at DESC LIMIT 1
-""").collect()
+w = WorkspaceClient()
 
-if existing:
-    details       = json.loads(existing[0]["details"])
-    endpoint_name = details.get("endpoint_name", "")
-    print(f"Knowledge Assistant already created — endpoint: {endpoint_name}")
-    dbutils.notebook.exit(f"SKIPPED — KA already exists: {endpoint_name}")
+# Idempotency check — find existing KA by display name
+existing_ka = None
+for item in w.knowledge_assistants.list_knowledge_assistants():
+    if getattr(item, "display_name", "") == KA_DISPLAY_NAME:
+        existing_ka = item
+        break
+
+if existing_ka:
+    print(f"Knowledge Assistant '{KA_DISPLAY_NAME}' already exists — skipping creation")
+    dbutils.notebook.exit(f"SKIPPED — KA already exists: {existing_ka.name}")
 
 # COMMAND ----------
 
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.knowledgeassistants import (
     KnowledgeAssistant,
     KnowledgeSource,
     FilesSpec,
 )
-
-w = WorkspaceClient()
 
 # Count PDFs using dbutils.fs (works on serverless — no FUSE needed)
 pdf_count = 0

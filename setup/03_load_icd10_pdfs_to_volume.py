@@ -3,12 +3,12 @@
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## Bootstrap Step 3 — Load ICD-10 PDFs into Unity Catalog Volume
-# MAGIC Copies PDF files from `data/icd10_pdfs/` in the Git repo into the
+# MAGIC Downloads PDF files directly from GitHub and writes them to the
 # MAGIC `icd10_reference_pdfs` UC Volume.
 # MAGIC
-# MAGIC Runs on serverless — uses the Workspace REST API to list and download files
-# MAGIC (no FUSE mount needed for reading), and Python `open()` for writing to the
-# MAGIC UC Volume (Unity Catalog volumes have full FUSE support on serverless).
+# MAGIC **Configuration:**
+# MAGIC - `pdf_github_url` — GitHub tree URL of the PDF directory, e.g.
+# MAGIC   `https://github.com/<owner>/<repo>/tree/<branch>/data/icd10_pdfs`
 # MAGIC
 # MAGIC **Knowledge Assistant constraints:**
 # MAGIC - Files larger than 50 MB are skipped by KA automatically
@@ -17,76 +17,78 @@
 # COMMAND ----------
 
 import os
-import base64
+import re
 import requests
 
-dbutils.widgets.text("catalog", "my_catalog")
-dbutils.widgets.text("schema",  "icd10_care_gap")
+dbutils.widgets.text("catalog",         "my_catalog")
+dbutils.widgets.text("schema",          "icd10_care_gap")
+dbutils.widgets.text("pdf_github_url",  "https://github.com/kuldeep-in/icd10-gapanalysis-demo/tree/main/data/icd10_pdfs")
 
-CATALOG = dbutils.widgets.get("catalog")
-SCHEMA  = dbutils.widgets.get("schema")
+CATALOG        = dbutils.widgets.get("catalog")
+SCHEMA         = dbutils.widgets.get("schema")
+PDF_GITHUB_URL = dbutils.widgets.get("pdf_github_url").strip()
 
 VOLUME_PATH    = f"/Volumes/{CATALOG}/{SCHEMA}/icd10_reference_pdfs"
-MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB — KA hard limit
+
+print(f"PDF source (GitHub) : {PDF_GITHUB_URL}")
+print(f"Destination (volume): {VOLUME_PATH}")
 
 # COMMAND ----------
 
-# Resolve workspace path to data/icd10_pdfs/ relative to this notebook.
-ctx           = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-api_token     = ctx.apiToken().get()
-api_url       = ctx.apiUrl().get()
-notebook_path = ctx.notebookPath().get()
+# Idempotency check
+existing = spark.sql(f"""
+    SELECT details FROM `{CATALOG}`.`{SCHEMA}`.bootstrap_status
+    WHERE step = 'load_icd10_pdfs' AND status = 'COMPLETED'
+    ORDER BY updated_at DESC LIMIT 1
+""").collect()
 
-if notebook_path.startswith("/Workspace"):
-    notebook_path = notebook_path[len("/Workspace"):]
-
-repo_root  = os.path.dirname(os.path.dirname(notebook_path))
-ws_pdf_dir = repo_root + "/data/icd10_pdfs"
-
-print(f"PDF source (workspace) : {ws_pdf_dir}")
-print(f"Destination (volume)   : {VOLUME_PATH}")
+if existing:
+    print("ICD-10 PDFs already loaded to volume — skipping")
+    dbutils.notebook.exit("SKIPPED")
 
 # COMMAND ----------
 
-# List PDFs in workspace directory via REST API
-list_resp = requests.get(
-    f"{api_url}/api/2.0/workspace/list",
-    headers={"Authorization": f"Bearer {api_token}"},
-    params={"path": ws_pdf_dir},
-    timeout=30,
+# Parse GitHub tree URL → GitHub Contents API URL
+# Input:  https://github.com/<owner>/<repo>/tree/<branch>/<path>
+# Output: https://api.github.com/repos/<owner>/<repo>/contents/<path>?ref=<branch>
+m = re.match(
+    r"https://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.*)",
+    PDF_GITHUB_URL,
 )
+if not m:
+    raise ValueError(
+        f"pdf_github_url must be a GitHub tree URL of the form "
+        f"https://github.com/<owner>/<repo>/tree/<branch>/<path>. Got: {PDF_GITHUB_URL}"
+    )
 
-if list_resp.status_code == 404:
-    dir_exists = False
-    ws_objects = []
-elif list_resp.status_code == 200:
-    dir_exists = True
-    ws_objects = list_resp.json().get("objects", [])
-else:
-    dir_exists = False
-    ws_objects = []
-    print(f"WARNING: workspace list returned HTTP {list_resp.status_code}: {list_resp.text}")
+owner, repo, branch, gh_path = m.group(1), m.group(2), m.group(3), m.group(4)
+api_url  = f"https://api.github.com/repos/{owner}/{repo}/contents/{gh_path}?ref={branch}"
+print(f"GitHub API: {api_url}")
 
-if not dir_exists:
-    print(f"WARNING: {ws_pdf_dir} does not exist or is empty.")
-    print("Commit ICD-10 PDF files to data/icd10_pdfs/ in the repo before running this step.")
+# COMMAND ----------
+
+# List files via GitHub Contents API
+list_resp = requests.get(api_url, headers={"Accept": "application/vnd.github+json"}, timeout=30)
+if list_resp.status_code != 200:
+    raise RuntimeError(f"GitHub API returned HTTP {list_resp.status_code}: {list_resp.text[:300]}")
+
+pdf_files = [
+    f for f in list_resp.json()
+    if f.get("type") == "file" and f["name"].lower().endswith(".pdf")
+]
+print(f"Found {len(pdf_files)} PDF file(s) in GitHub directory")
+
+if not pdf_files:
     spark.sql(f"""
         MERGE INTO `{CATALOG}`.`{SCHEMA}`.bootstrap_status AS t
         USING (SELECT 'load_icd10_pdfs' AS step) AS s ON t.step = s.step
         WHEN MATCHED THEN UPDATE SET status = 'WARNING', updated_at = current_timestamp(),
-            details = 'data/icd10_pdfs/ directory not found'
+            details = 'No PDFs found in GitHub directory'
         WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
-            VALUES ('load_icd10_pdfs', 'WARNING', current_timestamp(),
-                    'data/icd10_pdfs/ directory not found')
+            VALUES ('load_icd10_pdfs', 'WARNING', current_timestamp(), 'No PDFs found in GitHub directory')
     """)
-    dbutils.notebook.exit("WARNING: No PDF directory found")
-
-# Filter to PDF files only
-pdf_objects = [
-    obj for obj in ws_objects
-    if obj.get("object_type") == "FILE" and obj["path"].lower().endswith(".pdf")
-]
-print(f"Found {len(pdf_objects)} PDF file(s)")
+    dbutils.notebook.exit("WARNING: No PDFs found in GitHub directory")
 
 # COMMAND ----------
 
@@ -94,40 +96,39 @@ copied       = 0
 skipped_size = []
 skipped_name = []
 
-for obj in pdf_objects:
-    name = obj["path"].split("/")[-1]
-    size = obj.get("size", 0)
+for file_info in pdf_files:
+    name     = file_info["name"]
+    size     = file_info.get("size", 0)
+    size_mb  = size / (1024 * 1024)
+    dl_url   = file_info.get("download_url", "")
 
     if name.startswith("_") or name.startswith("."):
         skipped_name.append(name)
         print(f"  SKIP (name): {name}")
         continue
 
-    size_mb = size / (1024 * 1024)
     if size > MAX_SIZE_BYTES:
         skipped_size.append(f"{name} ({size_mb:.1f} MB)")
-        print(f"  SKIP (size): {name} — {size_mb:.1f} MB exceeds 50 MB limit")
+        print(f"  SKIP (size): {name} — {size_mb:.1f} MB exceeds 50 MB KA limit")
         continue
 
-    # Download from workspace via export API (returns base64-encoded content)
-    dl_resp = requests.get(
-        f"{api_url}/api/2.0/workspace/export",
-        headers={"Authorization": f"Bearer {api_token}"},
-        params={"path": obj["path"], "format": "AUTO"},
-        timeout=120,
-    )
-    if dl_resp.status_code != 200:
-        print(f"  ERROR downloading {name}: HTTP {dl_resp.status_code}")
+    if not dl_url:
+        print(f"  ERROR: no download_url for {name}")
         continue
 
-    pdf_bytes = base64.b64decode(dl_resp.json()["content"])
-
-    # Write to UC Volume — open() with /Volumes/ works on serverless (UC volumes have FUSE)
-    vol_path = f"{VOLUME_PATH}/{name}"
-    with open(vol_path, "wb") as fh:
-        fh.write(pdf_bytes)
-    print(f"  COPIED: {name} ({size_mb:.2f} MB)")
-    copied += 1
+    # Stream download directly to the UC Volume (FUSE path)
+    print(f"  Downloading: {name} ({size_mb:.2f} MB)…")
+    try:
+        with requests.get(dl_url, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            vol_path = f"{VOLUME_PATH}/{name}"
+            with open(vol_path, "wb") as fh:
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                    fh.write(chunk)
+        print(f"  COPIED: {name} ({size_mb:.2f} MB)")
+        copied += 1
+    except Exception as e:
+        print(f"  ERROR copying {name}: {e}")
 
 print(f"\nSummary: {copied} copied, {len(skipped_size)} skipped (size), {len(skipped_name)} skipped (name)")
 if skipped_size:
@@ -137,14 +138,13 @@ if skipped_size:
 
 if copied == 0 and not skipped_size:
     status  = "WARNING"
-    details = "No PDFs were copied — check data/icd10_pdfs/ in the repo"
+    details = "No PDFs were copied — check the pdf_github_url variable"
 else:
     status  = "COMPLETED"
-    details = f"{copied} PDFs loaded to {SCHEMA}.icd10_reference_pdfs volume"
+    details = f"{copied} PDFs downloaded from GitHub and loaded to {SCHEMA}.icd10_reference_pdfs volume"
     if skipped_size:
-        details += f"; {len(skipped_size)} skipped (over 50MB)"
+        details += f"; {len(skipped_size)} skipped (over 50 MB)"
 
-# Escape single quotes for safe SQL interpolation
 safe_details = details.replace("'", "''")
 
 spark.sql(f"""

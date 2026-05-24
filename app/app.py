@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 
 import dash
 from dash import dcc, html, callback, Input, Output, State
@@ -22,11 +22,12 @@ AI_GATEWAY_ROUTE    = os.getenv("AI_GATEWAY_ROUTE", "databricks-claude-sonnet-4-
 WAREHOUSE_ID        = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
 DATA_SETUP_JOB_NAME = os.getenv("DATA_SETUP_JOB_NAME", "ICD-10 Gap Demo — Data Setup")
 AI_SETUP_JOB_NAME   = os.getenv("AI_SETUP_JOB_NAME",   "ICD-10 Gap Demo — AI Setup")
+KA_NAME             = os.getenv("KA_NAME",             "ICD-10 Clinical Reference Assistant")
 
 BRAND_ORANGE = "#E87722"
 
-JOB1_STEPS = {"create_catalog", "ingest_patient_data", "load_icd10_pdfs"}
-JOB2_STEPS = {"create_knowledge_assistant", "configure_ai_gateway"}
+JOB1_STEPS = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data", "load_icd10_pdfs"}
+JOB2_STEPS = {"create_knowledge_assistant", "ka_configured_with_icd10_files", "configure_ai_gateway"}
 
 w = WorkspaceClient()
 
@@ -47,14 +48,23 @@ BOOTSTRAP_STEPS = [
         "step_id":     "create_catalog",
         "seq":         1,
         "group":       1,
-        "label":       "Unity Catalog & Database Setup",
-        "description": "Create catalog, schemas, Delta tables (patient_records, care_gap_rules, "
-                       "bootstrap_status) and the icd10_reference UC Volume.",
+        "label":       "Catalog & Schema Setup",
+        "description": "Create Unity Catalog, schema, all Delta tables (patient_records, "
+                       "care_gap_rules, bootstrap_status), UC Volume, and grant app SP permissions.",
         "icon":        "fa-database",
     },
     {
-        "step_id":     "ingest_patient_data",
+        "step_id":     "setup_care_gap_rules",
         "seq":         2,
+        "group":       1,
+        "label":       "Care Gap Rules Loaded",
+        "description": "Seed the care_gap_rules table with 20 evidence-based clinical rules "
+                       "aligned to HEDIS, ACC/AHA, ADA, GOLD, KDIGO, and USPSTF guidelines.",
+        "icon":        "fa-list-check",
+    },
+    {
+        "step_id":     "ingest_patient_data",
+        "seq":         3,
         "group":       1,
         "label":       "Patient Clinical Notes Ingested",
         "description": "Load 25 synthetic SOAP-format patient records from "
@@ -63,16 +73,16 @@ BOOTSTRAP_STEPS = [
     },
     {
         "step_id":     "load_icd10_pdfs",
-        "seq":         3,
+        "seq":         4,
         "group":       1,
         "label":       "ICD-10 Reference PDFs Uploaded to Volume",
-        "description": "Copy ICD-10 PDF reference files from the Git repo (data/icd10_pdfs/) "
-                       "into the Unity Catalog Volume — prerequisite for Knowledge Assistant indexing.",
+        "description": "Download ICD-10 PDF reference files from GitHub directly into the "
+                       "Unity Catalog Volume — prerequisite for Knowledge Assistant indexing.",
         "icon":        "fa-file-pdf",
     },
     {
         "step_id":     "create_knowledge_assistant",
-        "seq":         4,
+        "seq":         5,
         "group":       2,
         "label":       "Knowledge Assistant Created",
         "description": "Create the ICD-10 Knowledge Assistant agent via Databricks SDK, "
@@ -80,18 +90,17 @@ BOOTSTRAP_STEPS = [
         "icon":        "fa-robot",
     },
     {
-        "step_id":     "ka_pdf_sync",
-        "seq":         5,
+        "step_id":     "ka_configured_with_icd10_files",
+        "seq":         6,
         "group":       2,
-        "label":       "Knowledge Assistant PDF Indexing",
-        "description": "Asynchronous background process — the KA indexes all ICD-10 reference PDFs. "
-                       "This typically takes 30–60 minutes. ICD-10 Analyzer works once this completes.",
+        "label":       "KA Configured with ICD-10 Files",
+        "description": "The Knowledge Assistant has the ICD-10 UC Volume attached as a knowledge source. "
+                       "File indexing runs asynchronously in the background (30–60 min) after this step.",
         "icon":        "fa-brain",
-        "is_async":    True,
     },
     {
         "step_id":     "configure_ai_gateway",
-        "seq":         6,
+        "seq":         7,
         "group":       2,
         "label":       "AI Gateway Route Configured",
         "description": "Create the AI Gateway serving endpoint for the care gap foundation model "
@@ -158,62 +167,104 @@ def get_care_gap_rules(catalog: str = CATALOG, schema: str = SCHEMA) -> list[dic
     )
 
 
-def get_ka_endpoint_name(catalog: str = CATALOG, schema: str = SCHEMA) -> str:
+def _find_ka(display_name: str):
     try:
-        rows = execute_sql(
-            f"SELECT details FROM `{catalog}`.`{schema}`.bootstrap_status "
-            f"WHERE step = 'create_knowledge_assistant' AND status = 'COMPLETED' "
-            f"ORDER BY updated_at DESC LIMIT 1"
-        )
-        if rows:
-            return json.loads(rows[0]["details"]).get("endpoint_name", "")
+        for ka in w.knowledge_assistants.list_knowledge_assistants():
+            if getattr(ka, "display_name", "") == display_name:
+                return ka
     except Exception as e:
-        logger.warning(f"KA endpoint lookup: {e}")
+        logger.warning(f"KA list failed: {e}")
+    return None
+
+
+def get_ka_endpoint_name(ka_display_name: str = KA_NAME) -> str:
+    ka = _find_ka(ka_display_name)
+    if not ka:
+        return ""
+    try:
+        ep = getattr(ka, "endpoint_name", None)
+        if ep:
+            return ep
+        ka_name = getattr(ka, "name", "") or ""
+        suffix  = ka_name.split("/")[-1] if "/" in ka_name else ka_name
+        return suffix
+    except Exception as e:
+        logger.warning(f"KA endpoint derivation: {e}")
     return ""
 
 
-def _check_job1_artifacts(catalog: str, schema: str) -> dict:
-    result: dict = {}
-
-    for table, key in [("patient_records", "patient_records"), ("care_gap_rules", "care_gap_rules")]:
-        try:
-            r   = execute_sql(f"SELECT COUNT(*) as cnt FROM `{catalog}`.`{schema}`.`{table}`")
-            cnt = int(r[0]["cnt"]) if r else 0
-            result[key] = {"ok": cnt > 0, "cnt": cnt,
-                           "label": f"{cnt} row{'s' if cnt != 1 else ''}"}
-        except Exception as e:
-            result[key] = {"ok": False, "cnt": 0, "label": str(e)[:120]}
-
-    try:
-        entries = list(w.files.list_directory_contents(
-            f"/Volumes/{catalog}/{schema}/icd10_reference_pdfs"
-        ))
-        cnt = len(entries)
-        result["volume_pdfs"] = {"ok": cnt > 0, "cnt": cnt,
-                                  "label": f"{cnt} file{'s' if cnt != 1 else ''}"}
-    except Exception as e:
-        result["volume_pdfs"] = {"ok": False, "cnt": 0, "label": str(e)[:120]}
-
-    result["complete"] = (
-        result.get("patient_records", {}).get("ok", False) and
-        result.get("care_gap_rules",  {}).get("ok", False)
-    )
-    return result
-
-
-def _validate_job2_complete(catalog: str, schema: str) -> bool:
+def _chk_catalog(catalog: str) -> dict:
     try:
         rows = execute_sql(
-            f"SELECT step FROM `{catalog}`.`{schema}`.bootstrap_status "
-            f"WHERE step IN ('create_knowledge_assistant', 'configure_ai_gateway') "
-            f"AND status IN ('COMPLETED', 'SKIPPED')"
+            f"SELECT catalog_name FROM system.information_schema.catalogs "
+            f"WHERE catalog_name = '{catalog}'"
         )
-        completed = {r["step"] for r in rows}
-        return ("create_knowledge_assistant" in completed and
-                "configure_ai_gateway" in completed)
+        ok = len(rows) > 0
+        return {"ok": ok, "label": f"`{catalog}` found" if ok else f"`{catalog}` not found"}
     except Exception as e:
-        logger.debug(f"Job 2 artifact check failed: {e}")
-        return False
+        return {"ok": False, "label": str(e)[:100]}
+
+
+def _chk_schema(catalog: str, schema: str) -> dict:
+    try:
+        rows = execute_sql(
+            f"SELECT schema_name FROM `{catalog}`.information_schema.schemata "
+            f"WHERE schema_name = '{schema}'"
+        )
+        ok = len(rows) > 0
+        return {"ok": ok, "label": f"`{schema}` found" if ok else f"`{schema}` not found"}
+    except Exception as e:
+        return {"ok": False, "label": str(e)[:100]}
+
+
+def _chk_table_rows(catalog: str, schema: str, table: str) -> dict:
+    try:
+        r   = execute_sql(f"SELECT COUNT(*) as cnt FROM `{catalog}`.`{schema}`.`{table}`")
+        cnt = int(r[0]["cnt"]) if r else 0
+        return {"ok": cnt > 0, "cnt": cnt, "label": f"{cnt} row{'s' if cnt != 1 else ''}"}
+    except Exception as e:
+        return {"ok": False, "cnt": 0, "label": str(e)[:120]}
+
+
+def _chk_volume_files(catalog: str, schema: str, volume: str) -> dict:
+    try:
+        entries = list(w.files.list_directory_contents(f"/Volumes/{catalog}/{schema}/{volume}"))
+        cnt = len(entries)
+        return {"ok": cnt > 0, "cnt": cnt, "label": f"{cnt} file{'s' if cnt != 1 else ''}"}
+    except Exception as e:
+        return {"ok": False, "cnt": 0, "label": str(e)[:120]}
+
+
+def _chk_ka_exists(display_name: str) -> tuple[dict, object]:
+    ka = _find_ka(display_name)
+    if ka:
+        return {"ok": True, "label": f"`{display_name}` found"}, ka
+    return {"ok": False, "label": f"`{display_name}` not found"}, None
+
+
+def _chk_ka_sources(ka_obj) -> dict:
+    if ka_obj is None:
+        return {"ok": False, "label": "KA not found — create KA first"}
+    try:
+        sources = list(w.knowledge_assistants.list_knowledge_sources(parent=ka_obj.name))
+        if sources:
+            return {"ok": True, "label": f"{len(sources)} knowledge source(s) configured"}
+        return {"ok": False, "label": "No knowledge sources attached to KA"}
+    except Exception as e:
+        return {"ok": False, "label": str(e)[:100]}
+
+
+def _chk_ai_gateway(route: str) -> dict:
+    if route.startswith("databricks-"):
+        return {"ok": True, "label": "Foundation Model API (always available)"}
+    try:
+        w.serving_endpoints.get(name=route)
+        return {"ok": True, "label": f"Endpoint `{route}` ready"}
+    except Exception as e:
+        err = str(e)
+        if any(x in err for x in ("NOT_FOUND", "404", "does not exist", "not found")):
+            return {"ok": False, "label": f"Endpoint `{route}` not found"}
+        return {"ok": False, "label": err[:100]}
 
 
 def find_job_ids() -> tuple[int | None, int | None]:
@@ -244,144 +295,117 @@ def get_active_run(job_id: int) -> dict | None:
     return None
 
 
-def determine_trigger_action(
-    steps: list[dict],
-    job1_id: int | None,
-    job2_id: int | None,
-    job1_active: dict | None,
-    job2_active: dict | None,
+def _job1_action(
+    steps: list[dict], job1_id: int | None, job1_active: dict | None
 ) -> dict:
-    by_id = {s["step_id"]: s["status"] for s in steps}
-
+    by_id       = {s["step_id"]: s["status"] for s in steps}
     job1_done   = all(by_id.get(s) in DONE_STATUSES for s in JOB1_STEPS)
+    job1_failed = any(by_id.get(s) == "FAILED"      for s in JOB1_STEPS)
+    if job1_done:
+        return {"action": "done", "job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME,
+                "label": "Data Setup Complete", "description": "All data setup steps are complete.", "active_run": None}
+    if job1_active:
+        return {"action": "running", "job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME,
+                "label": "Data Setup Running…", "description": "Job 1 is in progress.", "active_run": job1_active}
+    return {
+        "action":      "run_job1",
+        "job_id":      job1_id,
+        "job_name":    DATA_SETUP_JOB_NAME,
+        "label":       "Re-run Data Setup" if job1_failed else "Run Data Setup",
+        "description": "Creates catalog, ingests patient records, uploads ICD-10 PDFs",
+        "active_run":  None,
+    }
+
+
+def _job2_action(
+    steps: list[dict], job2_id: int | None, job2_active: dict | None
+) -> dict:
+    by_id       = {s["step_id"]: s["status"] for s in steps}
     job2_done   = all(by_id.get(s) in DONE_STATUSES for s in JOB2_STEPS)
-    job1_failed = any(by_id.get(s) == "FAILED" for s in JOB1_STEPS)
-    job2_failed = any(by_id.get(s) == "FAILED" for s in JOB2_STEPS)
-
-    if job1_done and job2_done:
-        return {"action": "all_done", "job_id": None, "job_name": "", "label": "Setup Complete",
-                "description": "All steps are done.", "active_run": None}
-
-    if not job1_done:
-        if job1_active:
-            return {"action": "running", "job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME,
-                    "label": "Data Setup Running…", "description": "Job 1 is in progress.",
-                    "active_run": job1_active}
-        return {
-            "action":      "run_job1",
-            "job_id":      job1_id,
-            "job_name":    DATA_SETUP_JOB_NAME,
-            "label":       "Re-run Data Setup (Job 1)" if job1_failed else "Run Data Setup (Job 1)",
-            "description": "Creates catalog, ingests patient records, uploads ICD-10 PDFs",
-            "active_run":  None,
-        }
-
+    job2_failed = any(by_id.get(s) == "FAILED"      for s in JOB2_STEPS)
+    if job2_done:
+        return {"action": "done", "job_id": job2_id, "job_name": AI_SETUP_JOB_NAME,
+                "label": "AI Setup Complete", "description": "All AI setup steps are complete.", "active_run": None}
     if job2_active:
         return {"action": "running", "job_id": job2_id, "job_name": AI_SETUP_JOB_NAME,
-                "label": "AI Setup Running…", "description": "Job 2 is in progress.",
-                "active_run": job2_active}
+                "label": "AI Setup Running…", "description": "Job 2 is in progress.", "active_run": job2_active}
     return {
         "action":      "run_job2",
         "job_id":      job2_id,
         "job_name":    AI_SETUP_JOB_NAME,
-        "label":       "Re-run AI Setup (Job 2)" if job2_failed else "Run AI Setup (Job 2)",
+        "label":       "Re-run AI Setup" if job2_failed else "Run AI Setup",
         "description": "Creates Knowledge Assistant and configures AI Gateway (serverless)",
         "active_run":  None,
     }
 
 # ---------------------------------------------------------------------------
-# Bootstrap step status resolution
+# Pure object-based step status resolution (no bootstrap_status table)
 # ---------------------------------------------------------------------------
-def _resolve_ka_sync(ka_row: dict) -> tuple[str, str]:
-    try:
-        details         = json.loads(ka_row.get("details", "{}"))
-        ka_name         = details.get("ka_name", "")
-        sync_started_at = details.get("sync_started_at", "")
-        pdf_count       = details.get("pdf_count", 0)
-
-        if pdf_count == 0:
-            return "WARNING", "No PDFs were found in the volume when KA was created — upload PDFs and re-run bootstrap step 3."
-
-        if ka_name:
-            try:
-                sources = list(w.knowledge_assistants.list_knowledge_sources(parent=ka_name))
-                for src in sources:
-                    d      = src.as_dict() if hasattr(src, "as_dict") else {}
-                    state  = str(d.get("state", "")).upper()
-                    cutoff = d.get("knowledge_cutoff_time", "")
-                    if state in ("UPDATED", "COMPLETED", "SUCCESS", "DONE") or cutoff:
-                        return "COMPLETED", f"All PDFs indexed successfully ({pdf_count} file(s))"
-                    if any(x in state for x in ("FAIL", "ERROR")):
-                        return "FAILED", f"Sync failed: {state}"
-                    if state:
-                        return "IN_PROGRESS", f"Indexing status: {state}"
-            except Exception as sdk_err:
-                logger.warning(f"KA sync check: {sdk_err}")
-
-        if sync_started_at:
-            try:
-                sync_dt = datetime.fromisoformat(sync_started_at.replace("Z", "+00:00"))
-                elapsed = (datetime.now(timezone.utc) - sync_dt).total_seconds() / 60
-                if elapsed > 20:
-                    return "LIKELY_COMPLETE", (
-                        f"Sync started {int(elapsed)} min ago — likely complete. "
-                        "Verify in Databricks Agents UI."
-                    )
-                return "IN_PROGRESS", (
-                    f"Indexing in progress — {int(elapsed)} min elapsed "
-                    f"(typically 30–60 min for {pdf_count} file(s))"
-                )
-            except Exception:
-                pass
-
-        return "IN_PROGRESS", "Indexing in progress — check Agents UI for live status"
-
-    except Exception as e:
-        return "UNKNOWN", str(e)
-
-
-def get_bootstrap_step_statuses(catalog: str = CATALOG, schema: str = SCHEMA) -> list[dict]:
-    try:
-        rows = execute_sql(
-            f"SELECT step, status, updated_at, details "
-            f"FROM `{catalog}`.`{schema}`.bootstrap_status ORDER BY updated_at"
-        )
-        db = {r["step"]: r for r in rows}
-    except Exception as e:
-        logger.warning(f"bootstrap_status unavailable: {e}")
-        db = {}
+def _check_step_statuses(catalog: str, schema: str, ka_name: str) -> list[dict]:
+    # Pre-compute catalog/schema existence once to short-circuit dependent checks
+    cat_chk   = _chk_catalog(catalog)
+    sch_chk   = _chk_schema(catalog, schema) if cat_chk["ok"] else {"ok": False, "label": "skipped — catalog not found"}
+    schema_ok = sch_chk["ok"]
+    ka_obj    = None  # cached KA object — resolved on first KA step, reused for sources step
 
     result = []
     for step in BOOTSTRAP_STEPS:
-        sid = step["step_id"]
+        sid    = step["step_id"]
+        status = "NOT_STARTED"
+        detail = "Not yet started"
+        checks: list = []
 
-        if sid == "ka_pdf_sync":
-            ka_row = db.get("create_knowledge_assistant")
-            if not ka_row or ka_row.get("status") != "COMPLETED":
-                status, detail, ts = "NOT_STARTED", "Waiting for step 4 to complete", ""
+        if sid == "create_catalog":
+            checks = [
+                ("fa-layer-group", "Catalog", cat_chk),
+                ("fa-table",       "Schema",  sch_chk),
+            ]
+            if cat_chk["ok"] and sch_chk["ok"]:
+                status = "COMPLETED"
+                detail = f"Catalog `{catalog}` and schema `{schema}` exist"
             else:
-                status, detail = _resolve_ka_sync(ka_row)
-                ts = ka_row.get("updated_at", "")
-        else:
-            row = db.get(sid)
-            if not row:
-                status, detail, ts = "NOT_STARTED", "Not yet started", ""
-            else:
-                status = row.get("status", "UNKNOWN")
-                detail = row.get("details", "")
-                ts     = row.get("updated_at", "")
+                missing = "catalog" if not cat_chk["ok"] else "schema"
+                detail = f"`{missing}` not found — run Data Setup"
 
-        if detail and detail.strip().startswith("{"):
-            try:
-                d = json.loads(detail)
-                detail = "  |  ".join(
-                    f"{k}: {v}" for k, v in d.items()
-                    if v and k not in ("ka_name",)
-                )
-            except Exception:
-                pass
+        elif sid == "setup_care_gap_rules":
+            chk = _chk_table_rows(catalog, schema, "care_gap_rules") if schema_ok \
+                else {"ok": False, "label": "skipped — schema not found"}
+            checks = [("fa-list-check", "Care gap rules", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
 
-        result.append({**step, "status": status, "detail": detail, "updated_at": ts})
+        elif sid == "ingest_patient_data":
+            chk = _chk_table_rows(catalog, schema, "patient_records") if schema_ok \
+                else {"ok": False, "label": "skipped — schema not found"}
+            checks = [("fa-users", "Patient records", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
+
+        elif sid == "load_icd10_pdfs":
+            chk = _chk_volume_files(catalog, schema, "icd10_reference_pdfs")
+            checks = [("fa-file-pdf", "ICD-10 PDFs in volume", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
+
+        elif sid == "create_knowledge_assistant":
+            chk, ka_obj = _chk_ka_exists(ka_name)
+            checks = [("fa-robot", "Knowledge Assistant", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
+
+        elif sid == "ka_configured_with_icd10_files":
+            chk = _chk_ka_sources(ka_obj)
+            checks = [("fa-brain", "KA knowledge sources", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
+
+        elif sid == "configure_ai_gateway":
+            chk = _chk_ai_gateway(AI_GATEWAY_ROUTE)
+            checks = [("fa-network-wired", "AI Gateway endpoint", chk)]
+            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
+            detail = chk["label"]
+
+        result.append({**step, "status": status, "detail": detail, "checks": checks, "updated_at": ""})
 
     return result
 
@@ -470,6 +494,32 @@ def _step_accordion_item(step: dict) -> dbc.AccordionItem:
     ], style={"display": "flex", "alignItems": "center", "width": "100%", "gap": "0"})
 
     body_children = [html.P(step["description"], className="small text-muted mb-2")]
+
+    # Inline validation checks — embedded per step from job1_check
+    checks = step.get("checks", [])
+    if checks:
+        check_rows = []
+        for icon, label, c in checks:
+            ok      = c.get("ok", False)
+            detail_txt = c.get("label", "—")
+            color   = "text-success" if ok else "text-danger"
+            fa_icon = "fa-circle-check" if ok else "fa-circle-xmark"
+            check_rows.append(
+                html.Div([
+                    html.I(className=f"fa-solid {fa_icon} {color} me-2", style={"width": "14px"}),
+                    html.I(className=f"fa-solid {icon} me-2 text-muted", style={"width": "14px"}),
+                    html.Span(f"{label}: ", className="small fw-semibold me-1"),
+                    html.Span(detail_txt, className="small text-muted"),
+                ], className="d-flex align-items-center mb-1")
+            )
+        body_children.append(
+            html.Div(
+                check_rows,
+                className="mt-2 mb-1 ps-2 border-start border-2",
+                style={"borderColor": "#dee2e6"},
+            )
+        )
+
     if detail and detail != "Not yet started":
         body_children.append(
             html.Div([
@@ -490,8 +540,7 @@ def _step_accordion_item(step: dict) -> dbc.AccordionItem:
     )
 
 
-def _group_header(group_num: int, group_steps: list[dict]) -> html.Div:
-    meta      = GROUP_META[group_num]
+def _group_badge(group_steps: list[dict]) -> dbc.Badge:
     completed = sum(1 for s in group_steps if s["status"] in DONE_STATUSES)
     total     = len(group_steps)
     running   = any(s["status"] == "IN_PROGRESS" for s in group_steps)
@@ -499,143 +548,101 @@ def _group_header(group_num: int, group_steps: list[dict]) -> html.Div:
     warning   = any(s["status"] == "WARNING"      for s in group_steps)
 
     if completed == total:
-        badge = dbc.Badge(
-            [html.I(className="fa-solid fa-circle-check me-1"), f"{completed}/{total} Complete"],
-            color="success", pill=True, style={"fontSize": "11px"},
+        return dbc.Badge([html.I(className="fa-solid fa-circle-check me-1"), f"{completed}/{total} Complete"],
+                         color="success", pill=True, style={"fontSize": "11px"})
+    if failed:
+        return dbc.Badge([html.I(className="fa-solid fa-circle-xmark me-1"), "Failed"],
+                         color="danger", pill=True, style={"fontSize": "11px"})
+    if running:
+        return dbc.Badge([html.I(className="fa-solid fa-spinner fa-spin me-1"), "Running…"],
+                         color="warning", pill=True, style={"fontSize": "11px"})
+    if warning:
+        return dbc.Badge([html.I(className="fa-solid fa-triangle-exclamation me-1"), f"{completed}/{total} Complete"],
+                         color="warning", pill=True, style={"fontSize": "11px"})
+    return dbc.Badge(f"{completed}/{total} Complete", color="secondary", pill=True, style={"fontSize": "11px"})
+
+
+def _job_column(group: int, g_steps: list[dict], action: dict) -> dbc.Col:
+    """Render one column (Data Setup or AI Setup) with steps accordion + run button."""
+    meta        = GROUP_META[group]
+    btn_id      = "job1-trigger-btn" if group == 1 else "job2-trigger-btn"
+    result_id   = "job1-trigger-result" if group == 1 else "job2-trigger-result"
+    btn_color   = "primary" if group == 1 else "success"
+    border_color = meta["border"]
+
+    a       = action.get("action", "none")
+    job_id  = action.get("job_id")
+    no_job  = job_id is None
+
+    active_items = [s["step_id"] for s in g_steps if s["status"] not in DONE_STATUSES]
+    accordion = dbc.Accordion(
+        [_step_accordion_item(s) for s in g_steps],
+        always_open=True,
+        active_item=active_items,
+        className="mb-0",
+    )
+
+    # Run button / status area at the bottom of the card
+    if a == "done":
+        run_area = dbc.Alert(
+            [html.I(className="fa-solid fa-circle-check me-2 text-success"),
+             html.Strong("Complete")],
+            color="success", className="mb-0 py-2 small",
         )
-    elif failed:
-        badge = dbc.Badge(
-            [html.I(className="fa-solid fa-circle-xmark me-1"), "Failed"],
-            color="danger", pill=True, style={"fontSize": "11px"},
-        )
-    elif running:
-        badge = dbc.Badge(
-            [html.I(className="fa-solid fa-spinner fa-spin me-1"), "Running…"],
-            color="warning", pill=True, style={"fontSize": "11px"},
-        )
-    elif warning:
-        badge = dbc.Badge(
-            [html.I(className="fa-solid fa-triangle-exclamation me-1"), f"{completed}/{total} Complete"],
-            color="warning", pill=True, style={"fontSize": "11px"},
+    elif a == "running":
+        run_url = (action.get("active_run") or {}).get("url", "")
+        run_area = dbc.Alert(
+            [dbc.Spinner(size="sm", color="warning", className="me-2"),
+             html.Strong("Running — "),
+             html.A("View run →", href=run_url, target="_blank") if run_url else "check Workflows UI"],
+            color="warning", className="mb-0 py-2 small d-flex align-items-center",
         )
     else:
-        badge = dbc.Badge(
-            f"{completed}/{total} Complete",
-            color="secondary", pill=True, style={"fontSize": "11px"},
-        )
+        icon  = "fa-rotate-right" if "Re-run" in action.get("label", "") else "fa-play"
+        label = action.get("label", "Run")
+        run_area = html.Div([
+            dbc.Button(
+                [html.I(className=f"fa-solid {icon} me-2"), label],
+                id=btn_id,
+                color=btn_color,
+                disabled=no_job,
+                size="sm",
+                className="w-100",
+            ),
+            html.Div(
+                [html.I(className="fa-solid fa-triangle-exclamation me-1 text-danger"),
+                 "Job not found — deploy the bundle first."],
+                className="small text-danger mt-1",
+            ) if no_job else None,
+        ])
 
-    return html.Div(
-        dbc.Row([
-            dbc.Col([
-                html.I(className=f"fa-solid {meta['icon']} me-2"),
-                html.Strong(meta["label"], style={"fontSize": "14px"}),
-            ], width="auto"),
-            dbc.Col(badge, width="auto", className="ms-auto"),
-        ], align="center"),
-        style={
-            "background":   meta["bg"],
-            "borderLeft":   f"4px solid {meta['border']}",
-            "borderRadius": "6px",
-            "padding":      "10px 14px",
-            "marginBottom": "8px",
-        }
-    )
-
-
-def _job1_status_card(checks: dict) -> html.Div:
-    complete = checks.get("complete", False)
-    rows_cfg = [
-        ("patient_records", "fa-users",     "patient_records table"),
-        ("care_gap_rules",  "fa-list-check", "care_gap_rules table"),
-        ("volume_pdfs",     "fa-file-pdf",   "icd10_reference_pdfs volume"),
-    ]
-    check_items = []
-    for key, icon, label in rows_cfg:
-        c       = checks.get(key, {})
-        ok      = c.get("ok", False)
-        detail  = c.get("label", "—")
-        color   = "text-success" if ok else "text-danger"
-        fa_icon = "fa-circle-check" if ok else "fa-circle-xmark"
-        check_items.append(
-            html.Div([
-                html.I(className=f"fa-solid {fa_icon} {color} me-2"),
-                html.Span(f"{label}: ", className="fw-semibold"),
-                html.Span(detail, className="text-muted"),
-            ], className="d-flex align-items-center mb-1 small")
-        )
-
-    headline = (
-        "All required data confirmed — Job 1 is not needed."
-        if complete else
-        "Some data is missing — run Job 1 to complete setup."
-    )
-    return dbc.Alert(
-        [
-            html.Div([
-                html.I(className=f"fa-solid {'fa-shield-check' if complete else 'fa-magnifying-glass'} me-2"),
-                html.Strong("Job 1 Validation: "),
-                headline,
-            ], className="mb-2"),
-            *check_items,
-        ],
-        color="success" if complete else "warning",
-        className="py-2 mb-2 small",
-    )
-
-
-def _trigger_panel(action: dict) -> html.Div:
-    a = action.get("action", "none")
-
-    if a == "all_done":
-        return html.Div()
-
-    if a == "running":
-        run_url = (action.get("active_run") or {}).get("url", "")
-        return dbc.Alert(
-            [
-                dbc.Spinner(size="sm", color="warning", className="me-2"),
-                html.Strong(f"{action['job_name']} is running — "),
-                html.A("View live run →", href=run_url, target="_blank") if run_url else "check Workflows UI",
-            ],
-            color="warning", className="mb-3 py-2 d-flex align-items-center"
-        )
-
-    job_id = action.get("job_id")
-    no_job = job_id is None
-    icon   = "fa-play" if "Re-run" not in action["label"] else "fa-rotate-right"
-
-    return dbc.Card(
-        dbc.CardBody(
+    card = dbc.Card([
+        dbc.CardHeader(
             dbc.Row([
                 dbc.Col([
-                    html.Div(html.Strong(action["label"]), className="mb-1"),
-                    html.Div(action["description"], className="small text-muted"),
-                    html.Div(
-                        [html.I(className="fa-solid fa-triangle-exclamation me-1 text-danger"),
-                         "Job not found — deploy the bundle first."],
-                        className="small text-danger mt-1"
-                    ) if no_job else None,
-                ]),
-                dbc.Col(
-                    dbc.Button(
-                        [html.I(className=f"fa-solid {icon} me-2"), action["label"]],
-                        id="job-trigger-btn",
-                        color="primary" if "job1" in a else "success",
-                        disabled=no_job,
-                        size="sm",
-                    ),
-                    width="auto", className="d-flex align-items-center",
-                ),
-            ], align="center", justify="between"),
+                    html.I(className=f"fa-solid {meta['icon']} me-2"),
+                    html.Strong(meta["label"], style={"fontSize": "14px"}),
+                ], width="auto"),
+                dbc.Col(_group_badge(g_steps), width="auto", className="ms-auto"),
+            ], align="center"),
+            style={"background": meta["bg"], "borderBottom": f"2px solid {border_color}"},
         ),
-        className="mb-3 border-primary" if "job1" in a else "mb-3 border-success",
-        style={"borderLeft": "4px solid"},
-    )
+        dbc.CardBody([
+            html.Div(accordion, className="mb-3"),
+            run_area,
+            html.Div(id=result_id, className="mt-2"),
+        ], className="p-2"),
+    ], style={"borderTop": f"3px solid {border_color}", "height": "100%"})
+    return dbc.Col(card, md=6, className="mb-3")
 
 
-def build_home_tab_content(steps: list[dict], last_refreshed: str, all_done: bool,
-                           action: dict | None = None,
-                           job1_check: dict | None = None) -> html.Div:
+def build_home_tab_content(
+    steps: list[dict],
+    last_refreshed: str,
+    all_done: bool,
+    action1: dict | None = None,
+    action2: dict | None = None,
+) -> html.Div:
     completed  = sum(1 for s in steps if s["status"] in DONE_STATUSES)
     total      = len(steps)
     pct        = int(completed / total * 100)
@@ -655,24 +662,10 @@ def build_home_tab_content(steps: list[dict], last_refreshed: str, all_done: boo
 
     groups: dict[int, list[dict]] = {}
     for step in steps:
-        g = step.get("group", 1)
-        groups.setdefault(g, []).append(step)
+        groups.setdefault(step.get("group", 1), []).append(step)
 
-    group_sections = []
-    for g in sorted(groups.keys()):
-        g_steps = groups[g]
-        active_items = [s["step_id"] for s in g_steps if s["status"] not in DONE_STATUSES]
-        accordion = dbc.Accordion(
-            [_step_accordion_item(s) for s in g_steps],
-            always_open=True,
-            active_item=active_items,
-            className="mb-1",
-        )
-        group_body = [_group_header(g, g_steps)]
-        if g == 1 and job1_check is not None:
-            group_body.append(_job1_status_card(job1_check))
-        group_body.append(html.Div(accordion, className="ps-2 pt-1"))
-        group_sections.append(html.Div(group_body, className="mb-4"))
+    g1_steps = groups.get(1, [])
+    g2_steps = groups.get(2, [])
 
     return html.Div([
         banner,
@@ -690,18 +683,15 @@ def build_home_tab_content(steps: list[dict], last_refreshed: str, all_done: boo
                 ),
             ], width=8),
             dbc.Col(
-                html.Div(
-                    html.Small(f"Last updated: {last_refreshed}", className="text-muted"),
-                    className="text-end",
-                ),
-                width=4,
+                html.Small(f"Last updated: {last_refreshed}", className="text-muted"),
+                width=4, className="text-end",
             ),
         ], align="center", className="mb-3"),
 
-        _trigger_panel(action or {"action": "none"}),
-        html.Div(id="job-trigger-result", className="mb-2"),
-        html.Hr(className="mt-1 mb-3"),
-        *group_sections,
+        dbc.Row([
+            _job_column(1, g1_steps, action1 or {"action": "none"}),
+            _job_column(2, g2_steps, action2 or {"action": "none"}),
+        ], className="g-3"),
 
         html.Div([
             html.Hr(),
@@ -797,6 +787,7 @@ def _settings_layout() -> dbc.Container:
             ]),
             dbc.CardBody([
                 _row("Model Endpoint (Care Gap)",  AI_GATEWAY_ROUTE    or "—", "fa-network-wired"),
+                _row("Knowledge Assistant Name",    KA_NAME             or "—", "fa-robot"),
                 _row("Data Setup Job Name",         DATA_SETUP_JOB_NAME or "—", "fa-play"),
                 _row("AI Setup Job Name",           AI_SETUP_JOB_NAME   or "—", "fa-play"),
             ]),
@@ -863,7 +854,8 @@ app.layout = html.Div([
     dcc.Store(id="ka-endpoint-store", data=""),
     dcc.Store(id="patient-store",     data=[]),
     dcc.Store(id="all-done-store",    data=False),
-    dcc.Store(id="job-action-store",  data={}),
+    dcc.Store(id="job1-action-store", data={}),
+    dcc.Store(id="job2-action-store", data={}),
 ])
 
 # ---------------------------------------------------------------------------
@@ -937,7 +929,8 @@ def _not_ready_card(tab_name: str, waiting_for: str) -> dbc.Container:
     Output("all-done-store",     "data"),
     Output("ka-endpoint-store",  "data"),
     Output("patient-store",      "data"),
-    Output("job-action-store",   "data"),
+    Output("job1-action-store",  "data"),
+    Output("job2-action-store",  "data"),
     Input("home-refresh-btn",    "n_clicks"),
     Input("catalog-store",       "data"),
     Input("schema-store",        "data"),
@@ -957,48 +950,17 @@ def refresh_home(n_clicks, catalog, schema):
                  html.Strong("Settings"), " tab for current configuration."],
                 color="danger", className="py-2",
             )
-        ), False, "", [], {}
+        ), False, "", [], {}, {}
 
-    steps = get_bootstrap_step_statuses(cat, sch)
+    steps = _check_step_statuses(cat, sch, KA_NAME)
 
     job1_id, job2_id = find_job_ids()
     job1_active = get_active_run(job1_id) if job1_id else None
     job2_active = get_active_run(job2_id) if job2_id else None
 
-    job1_check = _check_job1_artifacts(cat, sch)
-    by_id      = {s["step_id"]: s["status"] for s in steps}
-
-    job1_db_done = all(by_id.get(s) in DONE_STATUSES for s in JOB1_STEPS)
-    if not job1_db_done and job1_check["complete"]:
-        pr  = job1_check.get("patient_records", {})
-        vol = job1_check.get("volume_pdfs", {})
-        for step in steps:
-            if step["status"] in DONE_STATUSES:
-                continue
-            sid = step["step_id"]
-            if sid == "create_catalog":
-                step["status"] = "COMPLETED"
-                step["detail"] = f"Catalog `{cat}.{sch}` confirmed"
-            elif sid == "ingest_patient_data":
-                step["status"] = "COMPLETED"
-                step["detail"] = f"Validated — {pr.get('label', 'rows present')}"
-            elif sid == "load_icd10_pdfs":
-                if vol.get("ok"):
-                    step["status"] = "COMPLETED"
-                    step["detail"] = f"Validated — {vol.get('label', 'files present')}"
-                else:
-                    step["status"] = "COMPLETED"
-                    step["detail"] = f"Core data present; {vol.get('label', 'volume empty')} — PDFs needed for KA"
-
-    job2_db_done = all(by_id.get(s) in DONE_STATUSES for s in JOB2_STEPS)
-    if not job2_db_done and _validate_job2_complete(cat, sch):
-        for step in steps:
-            if step["step_id"] in JOB2_STEPS and step["status"] not in DONE_STATUSES:
-                step["status"] = "COMPLETED"
-                step["detail"] = "Validated — endpoints confirmed"
-
+    # Overlay IN_PROGRESS when a job is actively running for not-yet-complete steps
     for step in steps:
-        if step["status"] in ("NOT_STARTED", "UNKNOWN"):
+        if step["status"] == "NOT_STARTED":
             if step["step_id"] in JOB1_STEPS and job1_active:
                 step["status"] = "IN_PROGRESS"
                 step["detail"] = "Job 1 is running…"
@@ -1014,49 +976,64 @@ def refresh_home(n_clicks, catalog, schema):
     if all_done:
         try:
             patients    = load_patients(cat, sch)
-            ka_endpoint = get_ka_endpoint_name(cat, sch)
+            ka_endpoint = get_ka_endpoint_name()
         except Exception as e:
             logger.warning(f"Post-completion data load failed: {e}")
 
-    action  = determine_trigger_action(steps, job1_id, job2_id, job1_active, job2_active)
-    content = build_home_tab_content(steps, now, all_done, action, job1_check=job1_check)
-    return content, all_done, ka_endpoint, patients, action
+    act1    = _job1_action(steps, job1_id, job1_active)
+    act2    = _job2_action(steps, job2_id, job2_active)
+    content = build_home_tab_content(steps, now, all_done, act1, act2)
+    return content, all_done, ka_endpoint, patients, act1, act2
 
 # ---------------------------------------------------------------------------
 # Job trigger callback
 # ---------------------------------------------------------------------------
-@callback(
-    Output("job-trigger-result", "children"),
-    Output("job-trigger-btn",    "disabled"),
-    Input("job-trigger-btn",     "n_clicks"),
-    State("job-action-store",    "data"),
-    prevent_initial_call=True,
-)
-def handle_job_trigger(n_clicks, action):
-    if not n_clicks or not action:
-        return dash.no_update, dash.no_update
+def _trigger_job(action: dict) -> tuple:
     job_id = action.get("job_id")
     if not job_id:
-        return dbc.Alert("Job not found — deploy the bundle first.", color="danger", className="py-2"), False
+        return dbc.Alert("Job not found — deploy the bundle first.", color="danger", className="py-2 small"), False
     try:
         waiter  = w.jobs.run_now(job_id=job_id)
         run_url = ""
         try:
-            run_details = w.jobs.get_run(run_id=waiter.run_id)
-            run_url = run_details.run_page_url or ""
+            run_url = w.jobs.get_run(run_id=waiter.run_id).run_page_url or ""
         except Exception:
             pass
         return dbc.Alert(
-            [
-                html.I(className="fa-solid fa-circle-check me-2 text-success"),
-                html.Strong(f"{action.get('job_name', 'Job')} triggered — "),
-                html.A("view run →", href=run_url, target="_blank") if run_url else html.Span("check Workflows UI"),
-            ],
-            color="success", className="py-2 d-flex align-items-center",
+            [html.I(className="fa-solid fa-circle-check me-2 text-success"),
+             html.Strong(f"{action.get('job_name', 'Job')} triggered — "),
+             html.A("view run →", href=run_url, target="_blank") if run_url else html.Span("check Workflows UI")],
+            color="success", className="py-2 small d-flex align-items-center",
         ), True
     except Exception as e:
         logger.error(f"Job trigger failed: {e}")
-        return dbc.Alert(f"Failed to trigger job: {e}", color="danger", className="py-2"), False
+        return dbc.Alert(f"Failed to trigger: {e}", color="danger", className="py-2 small"), False
+
+
+@callback(
+    Output("job1-trigger-result", "children"),
+    Output("job1-trigger-btn",    "disabled"),
+    Input("job1-trigger-btn",     "n_clicks"),
+    State("job1-action-store",    "data"),
+    prevent_initial_call=True,
+)
+def handle_job1_trigger(n_clicks, action):
+    if not n_clicks or not action:
+        return dash.no_update, dash.no_update
+    return _trigger_job(action)
+
+
+@callback(
+    Output("job2-trigger-result", "children"),
+    Output("job2-trigger-btn",    "disabled"),
+    Input("job2-trigger-btn",     "n_clicks"),
+    State("job2-action-store",    "data"),
+    prevent_initial_call=True,
+)
+def handle_job2_trigger(n_clicks, action):
+    if not n_clicks or not action:
+        return dash.no_update, dash.no_update
+    return _trigger_job(action)
 
 
 # ---------------------------------------------------------------------------

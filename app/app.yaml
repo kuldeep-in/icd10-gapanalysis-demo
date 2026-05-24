@@ -13,6 +13,8 @@ env:
     value: "ICD-10 Gap Demo — Data Setup"
   - name: AI_SETUP_JOB_NAME
     value: "ICD-10 Gap Demo — AI Setup"
+  - name: KA_NAME
+    value: "ICD-10 Clinical Reference Assistant"
 
 resources:
   - name: "sql-warehouse"
