@@ -1,72 +1,97 @@
 resources:
   jobs:
-    bootstrap_workflow:
-      name: ${var.bootstrap_job_name}
-      description: >
-        One-time setup job: creates Unity Catalog structure, ingests patient data from JSON,
-        loads ICD-10 PDFs into UC Volume, creates Knowledge Assistant, and configures AI Gateway.
 
-      job_clusters:
-        - job_cluster_key: bootstrap_cluster
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            node_type_id: Standard_DS3_v2
-            num_workers: 0
-            spark_conf:
-              spark.databricks.cluster.profile: singleNode
-              spark.master: "local[*]"
-            azure_attributes:
-              availability: ON_DEMAND_AZURE
-              first_on_demand: 1
+    # ── Job 1: Data Setup (Serverless) ────────────────────────────────────────
+    # All tasks use spark.read / dbutils.fs — no FUSE mounts, no cluster needed.
+    # Run this job first, then run the AI Setup job.
+    bootstrap_data_setup:
+      name: ${var.data_setup_job_name}
+      description: >
+        Job 1 of 2 — Creates Unity Catalog structure, ingests patient clinical notes,
+        and uploads ICD-10 PDFs to the UC Volume. Runs entirely on serverless compute.
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+      permissions:
+        - service_principal_name: ${var.app_service_principal}
+          level: CAN_MANAGE_RUN
 
       tasks:
         - task_key: create_catalog
           description: Create Unity Catalog, schemas, Delta tables, Volume, and care gap rules
-          job_cluster_key: bootstrap_cluster
+          environment_key: default
           notebook_task:
-            notebook_path: ../setup/01_create_catalog
+            notebook_path: ${workspace.file_path}/setup/01_create_catalog
             base_parameters:
               catalog: ${var.catalog}
+              schema: ${var.schema}
+              app_sp_id: ${var.app_service_principal}
 
         - task_key: ingest_patient_data
-          description: Load patient_records.json from the Git repo into the clinical_data.patient_records Delta table
+          description: Load patient_records.json via spark.read.json into clinical_data.patient_records
           depends_on:
             - task_key: create_catalog
-          job_cluster_key: bootstrap_cluster
+          environment_key: default
           notebook_task:
-            notebook_path: ../setup/02_ingest_patient_json
+            notebook_path: ${workspace.file_path}/setup/02_ingest_patient_json
             base_parameters:
               catalog: ${var.catalog}
+              schema: ${var.schema}
 
         - task_key: load_icd10_pdfs
-          description: Copy ICD-10 PDF files from the data/ directory into the icd10_reference UC Volume
+          description: Copy ICD-10 PDFs via dbutils.fs.cp from Git repo into the icd10_reference UC Volume
           depends_on:
             - task_key: create_catalog
-          job_cluster_key: bootstrap_cluster
+          environment_key: default
           notebook_task:
-            notebook_path: ../setup/03_load_icd10_pdfs_to_volume
+            notebook_path: ${workspace.file_path}/setup/03_load_icd10_pdfs_to_volume
             base_parameters:
               catalog: ${var.catalog}
+              schema: ${var.schema}
 
+    # ── Job 2: AI Setup (Serverless) ──────────────────────────────────────────
+    # Pure SDK calls — Knowledge Assistant and AI Gateway configuration.
+    # Run after the Data Setup job completes.
+    bootstrap_ai_setup:
+      name: ${var.ai_setup_job_name}
+      description: >
+        Job 2 of 2 — Creates the ICD-10 Knowledge Assistant and configures the AI
+        Gateway serving endpoint. Runs on serverless compute.
+        Run after the Data Setup job completes.
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.28.0
+
+      permissions:
+        - service_principal_name: ${var.app_service_principal}
+          level: CAN_MANAGE_RUN
+
+      tasks:
         - task_key: create_knowledge_assistant
-          description: Create KA agent via SDK, attach UC Volume as knowledge source, trigger PDF sync
-          depends_on:
-            - task_key: load_icd10_pdfs
-          job_cluster_key: bootstrap_cluster
+          description: Create KA agent, attach UC Volume as knowledge source, trigger PDF sync
+          environment_key: default
           notebook_task:
-            notebook_path: ../setup/04_create_knowledge_assistant
+            notebook_path: ${workspace.file_path}/setup/04_create_knowledge_assistant
             base_parameters:
               catalog: ${var.catalog}
+              schema: ${var.schema}
 
         - task_key: configure_ai_gateway
-          description: Create or update the AI Gateway route for the care gap foundation model
-          depends_on:
-            - task_key: ingest_patient_data
-          job_cluster_key: bootstrap_cluster
+          description: Create the AI Gateway serving endpoint for the care gap foundation model
+          environment_key: default
           notebook_task:
-            notebook_path: ../setup/05_configure_ai_gateway
+            notebook_path: ${workspace.file_path}/setup/05_configure_ai_gateway
             base_parameters:
               catalog: ${var.catalog}
+              schema: ${var.schema}
               ai_gateway_route: ${var.ai_gateway_route}
               secret_scope: ${var.secret_scope}
               model_provider: ${var.model_provider}
+

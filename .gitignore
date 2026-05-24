@@ -75,3 +75,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .tox/
+
+# ── ICD-10 PDFs (large binary files — commit .gitkeep only) ─────────────────
+data/icd10_pdfs/*.pdf

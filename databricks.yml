@@ -3,23 +3,38 @@ bundle:
 
 variables:
   catalog:
-    default: icd10_gap_demo
+    default: my_catalog
     description: Unity Catalog name
+  schema:
+    default: icd10_care_gap
+    description: Schema name (single schema used for all tables and the icd10_reference_pdfs volume)
   ai_gateway_route:
     default: care-gap-advisor
     description: AI Gateway route name for the care gap model
   warehouse_id:
-    default: ""
-    description: SQL warehouse ID used by the Databricks App for Delta queries
-  bootstrap_job_name:
-    default: "ICD-10 Gap Demo — Bootstrap"
-    description: Display name of the bootstrap workflow job
+    default: "<your-warehouse-id>"
+    description: >
+      SQL warehouse ID used by the Databricks App for Delta queries.
+      Referenced in app/app.yaml resources block — databricks apps deploy
+      automatically grants the app SP CAN_USE on this warehouse.
+  data_setup_job_name:
+    default: "ICD-10 Gap Demo — Data Setup"
+    description: Job 1 — catalog creation + patient data + PDF upload (standard cluster, FUSE mounts)
+  ai_setup_job_name:
+    default: "ICD-10 Gap Demo — AI Setup"
+    description: Job 2 — Knowledge Assistant + AI Gateway (serverless, SDK only)
   secret_scope:
     default: care-gap-demo
-    description: Databricks secret scope containing anthropic-api-key (used by step 5 if model_provider=anthropic)
+    description: Databricks secret scope containing anthropic-api-key (used by AI Setup if model_provider=anthropic)
   model_provider:
-    default: anthropic
-    description: Foundation model provider for care gap route — "anthropic" or "databricks" (DBRX Instruct)
+    default: databricks
+    description: Foundation model provider for care gap route — "databricks" (FMAPI, no key needed) or "anthropic" (external key via secret scope)
+  app_service_principal:
+    default: ""
+    description: >
+      Application ID (client_id UUID) of the Databricks App service principal.
+      Do not hardcode — deploy.sh reads this from the live app after apps deploy.
+      Pass via: databricks bundle deploy --var="app_service_principal=$(databricks apps get icd10-gap-advisor ... | jq -r .service_principal_client_id)"
 
 targets:
   dev:
