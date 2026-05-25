@@ -1,6 +1,8 @@
 # Databricks notebook source
 
+
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Job 2 — Configure Knowledge Source
 # MAGIC Attaches the `icd10_reference_pdfs` UC Volume to the Knowledge Assistant
@@ -165,4 +167,3 @@ spark.sql(f"""
 
 print(f"\nStep complete — bootstrap_status updated: ka_configured_with_icd10_files → COMPLETED")
 print(f"KA endpoint: {KA_ENDPOINT_NAME}")
-

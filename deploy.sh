@@ -31,14 +31,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Step 1: Read all variable defaults from databricks.yml ───────────────────
 # databricks.yml is the single source of truth — no defaults hardcoded here.
 echo "Reading config from databricks.yml..."
-eval "$(python3 << 'PYEOF'
+_py=$(mktemp /tmp/yaml_parser_XXXXXX.py)
+cat > "$_py" << 'PYEOF'
 import re, sys
 
 with open("databricks.yml") as f:
     content = f.read()
 
-# Regex-based parser — no pyyaml dependency needed.
-# Handles "  key:\n    default: value" and "  key:\n    default: \"value\"" patterns.
 current_var = None
 for line in content.splitlines():
     m = re.match(r'^  (\w+):', line)
@@ -48,10 +47,12 @@ for line in content.splitlines():
         m2 = re.match(r'^\s+default:\s*["\']?(.*?)["\']?\s*$', line)
         if m2:
             val = m2.group(1).replace('"', '\\"')
-            print(f'{current_var.upper()}="{val}"')
+            print('%s="%s"' % (current_var.upper(), val))
             current_var = None
 PYEOF
-)"
+_yaml_vars=$(python3 "$_py")
+rm -f "$_py"
+eval "$_yaml_vars"
 
 # Deployment mechanics — not bundle variables, not in databricks.yml
 PROFILE="DEFAULT"
@@ -90,12 +91,13 @@ echo ""
 
 # ── Step 2: Resolve SQL warehouse + KA endpoint ───────────────────────────────
 echo "▶ Step 2/6 — Resolving SQL warehouse and KA endpoint"
-eval "$(python3 "${SCRIPT_DIR}/setup_resources.py" \
+_resource_vars=$(python3 "${SCRIPT_DIR}/setup_resources.py" \
     --profile          "$PROFILE" \
     --catalog          "$CATALOG" \
     --schema           "$SCHEMA" \
     --warehouse-id     "$WAREHOUSE_ID" \
-    --ka-display-name  "$KA_DISPLAY_NAME")"
+    --ka-display-name  "$KA_DISPLAY_NAME")
+eval "$_resource_vars"
 
 echo "  Warehouse:   $WAREHOUSE_ID"
 echo "  KA name:     $KA_DISPLAY_NAME"
@@ -162,11 +164,11 @@ echo ""
 echo "▶ Step 5/6 — Granting permissions to app service principal"
 APP_SP_CLIENT_ID=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['service_principal_client_id'])"
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["service_principal_client_id"])'
 )
 APP_SP_NAME=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['service_principal_name'])"
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["service_principal_name"])'
 )
 echo "  App SP: $APP_SP_NAME ($APP_SP_CLIENT_ID)"
 
@@ -178,7 +180,7 @@ echo "  ✔ Warehouse CAN_USE granted"
 
 KA_ENDPOINT_ID=$(
   databricks serving-endpoints get "$KA_ENDPOINT_NAME" --profile="$PROFILE" -o json \
-  | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])"
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'
 )
 databricks permissions update serving-endpoints "$KA_ENDPOINT_ID" \
   --profile="$PROFILE" \

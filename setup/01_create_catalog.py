@@ -82,13 +82,23 @@ CREATE TABLE IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.care_gap_findings (
     patient_id         STRING,
     rule_id            STRING,
     gap_name           STRING,
-    identified_at      TIMESTAMP,
+    condition          STRING,
+    priority           STRING,
+    guideline          STRING,
+    finding            STRING,
     recommended_action STRING,
-    priority           STRING
+    created_at         TIMESTAMP
 )
 USING DELTA
-COMMENT 'Surfaced care gaps per patient identified by the Care Gap Advisor'
+COMMENT 'Care gaps identified per patient, saved by user from the Care Gap Advisor'
 """)
+
+# Ensure new columns exist on tables created with the old schema
+for _col in ["condition STRING", "guideline STRING", "finding STRING", "created_at TIMESTAMP"]:
+    try:
+        spark.sql(f"ALTER TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_findings ADD COLUMN IF NOT EXISTS {_col}")
+    except Exception:
+        pass
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.bootstrap_status (
@@ -115,6 +125,7 @@ if APP_SP_ID:
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.bootstrap_status TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.icd10_analysis_results TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_findings TO `{APP_SP_ID}`",
+        f"GRANT MODIFY ON TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_findings TO `{APP_SP_ID}`",
         f"GRANT READ VOLUME ON VOLUME `{CATALOG}`.`{SCHEMA}`.icd10_reference_pdfs TO `{APP_SP_ID}`",
     ]
     for stmt in grants:

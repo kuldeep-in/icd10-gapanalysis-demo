@@ -40,6 +40,7 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              app_sp_id: ${var.app_service_principal}
 
         - task_key: ingest_patient_data
           description: Load patient_records.json via spark.read.json into patient_records table
