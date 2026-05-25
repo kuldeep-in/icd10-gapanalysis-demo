@@ -1,66 +1,156 @@
 #!/usr/bin/env bash
-# deploy.sh — Full deployment script for icd10-gapanalysis-demo
+# deploy.sh — Full deployment for icd10-gapanalysis-demo
+#
+# databricks.yml is the single source of truth for all config variables.
+# This script reads defaults from databricks.yml — no values are hardcoded here.
+# Command-line flags override those defaults when provided.
 #
 # Sequence:
-#   1. Deploy the Databricks App  → establishes the app service principal
-#   2. Read the app SP client_id  → avoids hardcoding the UUID anywhere
-#   3. Deploy the bundle          → creates Jobs and grants CAN_MANAGE_RUN to the app SP
+#   1. Read variable defaults from databricks.yml
+#   2. setup_resources.py  — resolve / create SQL warehouse + KA endpoint
+#   3. Generate app.yaml   — write all env vars from resolved values
+#   4. Deploy app          — establishes app service principal
+#   5. Grant permissions   — warehouse CAN_USE + KA endpoint CAN_QUERY to app SP
+#   6. Bundle deploy       — creates Jobs with all vars from single source
 #
 # Usage:
-#   ./deploy.sh --app-path <workspace-path-to-app-dir> \
-#               [--profile <profile>] [--catalog <name>] [--schema <name>] \
-#               [--warehouse <id>] [--model-provider anthropic|databricks]
+#   ./deploy.sh --app-path <workspace-path-to-app-dir> [overrides]
 #
-#   --app-path   Workspace path to the app/ directory, e.g.
-#                /Workspace/Users/you@example.com/icd10-gapanalysis-demo/app
-#
-# Defaults: profile=DEFAULT, catalog=my_catalog, model-provider=databricks
+# Overrides (all optional — defaults come from databricks.yml):
+#   --profile           Databricks CLI profile
+#   --catalog           Unity Catalog name
+#   --schema            Schema name
+#   --warehouse-id      SQL warehouse ID         (auto-created if omitted)
+#   --ka-display-name   KA display name          (created if not found)
+#   --app-path          Workspace path to app/ directory (required)
 
 set -euo pipefail
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Step 1: Read all variable defaults from databricks.yml ───────────────────
+# databricks.yml is the single source of truth — no defaults hardcoded here.
+echo "Reading config from databricks.yml..."
+eval "$(python3 << 'PYEOF'
+import re, sys
+
+with open("databricks.yml") as f:
+    content = f.read()
+
+# Regex-based parser — no pyyaml dependency needed.
+# Handles "  key:\n    default: value" and "  key:\n    default: \"value\"" patterns.
+current_var = None
+for line in content.splitlines():
+    m = re.match(r'^  (\w+):', line)
+    if m:
+        current_var = m.group(1)
+    if current_var:
+        m2 = re.match(r'^\s+default:\s*["\']?(.*?)["\']?\s*$', line)
+        if m2:
+            val = m2.group(1).replace('"', '\\"')
+            print(f'{current_var.upper()}="{val}"')
+            current_var = None
+PYEOF
+)"
+
+# Deployment mechanics — not bundle variables, not in databricks.yml
 PROFILE="DEFAULT"
-CATALOG="my_catalog"
-SCHEMA="icd10_care_gap"
-WAREHOUSE_ID="<your-warehouse-id>"
-MODEL_PROVIDER="databricks"
 APP_NAME="icd10-gap-advisor"
 APP_SOURCE_PATH=""
 
+# ── Command-line overrides ────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --profile)        PROFILE="$2";        shift 2 ;;
-    --catalog)        CATALOG="$2";        shift 2 ;;
-    --schema)         SCHEMA="$2";         shift 2 ;;
-    --warehouse)      WAREHOUSE_ID="$2";   shift 2 ;;
-    --model-provider) MODEL_PROVIDER="$2"; shift 2 ;;
-    --app-path)       APP_SOURCE_PATH="$2"; shift 2 ;;
+    --profile)           PROFILE="$2";           shift 2 ;;
+    --catalog)           CATALOG="$2";           shift 2 ;;
+    --schema)            SCHEMA="$2";            shift 2 ;;
+    --warehouse-id)      WAREHOUSE_ID="$2";      shift 2 ;;
+    --ka-display-name)   KA_DISPLAY_NAME="$2";   shift 2 ;;
+    --app-path)          APP_SOURCE_PATH="$2";   shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
 
 if [ -z "$APP_SOURCE_PATH" ]; then
   echo "ERROR: --app-path is required."
-  echo "  Provide the workspace path to the app/ directory, e.g.:"
-  echo "  --app-path /Workspace/Users/you@example.com/icd10-gapanalysis-demo/app"
+  echo "  Example: --app-path /Workspace/Users/you@databricks.com/icd10-gapanalysis-demo/app"
   exit 1
 fi
 
 echo ""
 echo "═══════════════════════════════════════════════════"
-echo "  ICD-10 Gap Analysis Demo — Full Deployment"
+echo "  ICD-10 Gap Analysis Demo — Deployment"
 echo "═══════════════════════════════════════════════════"
-echo "  Profile:    $PROFILE"
-echo "  Catalog:    $CATALOG"
-echo "  Schema:     $SCHEMA"
-echo "  Warehouse:  $WAREHOUSE_ID"
-echo "  Model:      $MODEL_PROVIDER"
-echo "  App source: $APP_SOURCE_PATH"
+echo "  Profile:       $PROFILE"
+echo "  Catalog:       $CATALOG / $SCHEMA"
+echo "  App source:    $APP_SOURCE_PATH"
+echo "  KA name:       $KA_DISPLAY_NAME"
 echo "═══════════════════════════════════════════════════"
 echo ""
 
-# ── Step 1: Deploy the app first ─────────────────────────────────────────────
-echo "▶ Step 1/3 — Deploy Databricks App (establishes app service principal)"
+# ── Step 2: Resolve SQL warehouse + KA endpoint ───────────────────────────────
+echo "▶ Step 2/6 — Resolving SQL warehouse and KA endpoint"
+eval "$(python3 "${SCRIPT_DIR}/setup_resources.py" \
+    --profile          "$PROFILE" \
+    --catalog          "$CATALOG" \
+    --schema           "$SCHEMA" \
+    --warehouse-id     "$WAREHOUSE_ID" \
+    --ka-display-name  "$KA_DISPLAY_NAME")"
+
+echo "  Warehouse:   $WAREHOUSE_ID"
+echo "  KA name:     $KA_DISPLAY_NAME"
+echo "  KA endpoint: $KA_ENDPOINT_NAME"
+echo "✔ Resources resolved"
+echo ""
+
+# ── Step 3: Generate app.yaml from resolved values ────────────────────────────
+# All variables from databricks.yml are reflected as env vars in the app.
+echo "▶ Step 3/6 — Generating app.yaml"
+TEMP_APP_YAML="$(mktemp /tmp/icd10_app_yaml.XXXXXX)"
+
+cat > "$TEMP_APP_YAML" << APPCFG
+command: ["python", "app.py"]
+
+# Generated by deploy.sh — do not edit manually.
+# Source of truth: databricks.yml variables.
+
+env:
+  - name: UC_CATALOG
+    value: "${CATALOG}"
+  - name: UC_SCHEMA
+    value: "${SCHEMA}"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "${WAREHOUSE_ID}"
+  - name: FMAPI_ENDPOINT
+    value: "${FMAPI_ENDPOINT}"
+  - name: KA_ENDPOINT_NAME
+    value: "${KA_ENDPOINT_NAME}"
+  - name: KA_NAME
+    value: "${KA_NAME}"
+  - name: DATA_SETUP_JOB_NAME
+    value: "${DATA_SETUP_JOB_NAME}"
+  - name: AI_SETUP_JOB_NAME
+    value: "${AI_SETUP_JOB_NAME}"
+
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: "${WAREHOUSE_ID}"
+      permission: "CAN_USE"
+APPCFG
+
+databricks workspace import "${APP_SOURCE_PATH}/app.yaml" \
+  --file "$TEMP_APP_YAML" \
+  --format AUTO \
+  --overwrite \
+  --profile="$PROFILE"
+
+rm -f "$TEMP_APP_YAML"
+echo "✔ app.yaml generated and uploaded"
+echo ""
+
+# ── Step 4: Deploy the app ────────────────────────────────────────────────────
+echo "▶ Step 4/6 — Deploying Databricks App"
 databricks apps deploy "$APP_NAME" \
   --source-code-path "$APP_SOURCE_PATH" \
   --mode SNAPSHOT \
@@ -68,8 +158,8 @@ databricks apps deploy "$APP_NAME" \
 echo "✔ App deployed"
 echo ""
 
-# ── Step 2: Read the app SP client_id ────────────────────────────────────────
-echo "▶ Step 2/3 — Reading app service principal identity"
+# ── Step 5: Read app SP + grant permissions ───────────────────────────────────
+echo "▶ Step 5/6 — Granting permissions to app service principal"
 APP_SP_CLIENT_ID=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['service_principal_client_id'])"
@@ -78,31 +168,47 @@ APP_SP_NAME=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
   | python3 -c "import sys, json; print(json.load(sys.stdin)['service_principal_name'])"
 )
-echo "  App SP client_id : $APP_SP_CLIENT_ID"
-echo "  App SP name      : $APP_SP_NAME"
-echo "✔ Identity resolved"
-echo ""
+echo "  App SP: $APP_SP_NAME ($APP_SP_CLIENT_ID)"
 
-# ── Step 2b: Grant warehouse CAN_USE to app SP ───────────────────────────────
-# app.yaml resources block does NOT automatically apply warehouse ACLs —
-# this explicit grant is required so the app can execute SQL queries.
-echo "▶ Step 2b/3 — Granting warehouse CAN_USE to app SP"
 databricks permissions update warehouses "$WAREHOUSE_ID" \
   --profile="$PROFILE" \
-  --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_USE\"}]}"
-echo "✔ Warehouse CAN_USE granted to $APP_SP_CLIENT_ID"
+  --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_USE\"}]}" \
+  > /dev/null
+echo "  ✔ Warehouse CAN_USE granted"
+
+KA_ENDPOINT_ID=$(
+  databricks serving-endpoints get "$KA_ENDPOINT_NAME" --profile="$PROFILE" -o json \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])"
+)
+databricks permissions update serving-endpoints "$KA_ENDPOINT_ID" \
+  --profile="$PROFILE" \
+  --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_QUERY\"}]}" \
+  > /dev/null
+echo "  ✔ KA serving endpoint CAN_QUERY granted ($KA_ENDPOINT_NAME)"
+
+KA_ID="${KA_NAME#knowledge-assistants/}"
+databricks permissions update knowledge-assistants "$KA_ID" \
+  --profile="$PROFILE" \
+  --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_QUERY\"}]}" \
+  > /dev/null
+echo "  ✔ KA resource CAN_QUERY granted (knowledge-assistants/$KA_ID)"
+echo "✔ Permissions granted"
 echo ""
 
-# ── Step 3: Deploy the bundle with the app SP ─────────────────────────────────
-echo "▶ Step 3/3 — Deploy bundle (creates Jobs + grants CAN_MANAGE_RUN to app SP)"
-DATABRICKS_TF_EXEC_PATH=$(which terraform) \
-DATABRICKS_TF_VERSION=1.15.2 \
+# ── Step 6: Bundle deploy (Jobs) ──────────────────────────────────────────────
+# All variable values flow from databricks.yml defaults + step 2 resolution.
+echo "▶ Step 6/6 — Deploying bundle (Jobs)"
+DATABRICKS_TF_EXEC_PATH=$(which terraform) DATABRICKS_TF_VERSION=1.15.2 \
 databricks bundle deploy \
-  --var="app_service_principal=$APP_SP_CLIENT_ID" \
   --var="catalog=$CATALOG" \
   --var="schema=$SCHEMA" \
   --var="warehouse_id=$WAREHOUSE_ID" \
-  --var="model_provider=$MODEL_PROVIDER" \
+  --var="fmapi_endpoint=$FMAPI_ENDPOINT" \
+  --var="ka_endpoint_name=$KA_ENDPOINT_NAME" \
+  --var="ka_name=$KA_NAME" \
+  --var="data_setup_job_name=$DATA_SETUP_JOB_NAME" \
+  --var="ai_setup_job_name=$AI_SETUP_JOB_NAME" \
+  --var="app_service_principal=$APP_SP_CLIENT_ID" \
   --profile="$PROFILE"
 echo "✔ Bundle deployed"
 echo ""
@@ -110,16 +216,12 @@ echo ""
 echo "═══════════════════════════════════════════════════"
 echo "  Deployment complete!"
 echo ""
-echo "  Resources created:"
-echo "  • App: $APP_NAME"
-echo "    (source: $APP_SOURCE_PATH)"
-echo "    (CAN_USE on warehouse $WAREHOUSE_ID)"
-echo "  • Job 1: ICD-10 Gap Demo — Data Setup"
-echo "    (CAN_MANAGE_RUN → $APP_SP_CLIENT_ID)"
-echo "  • Job 2: ICD-10 Gap Demo — AI Setup"
-echo "    (CAN_MANAGE_RUN → $APP_SP_CLIENT_ID)"
+echo "  App:         $APP_NAME"
+echo "  Warehouse:   $WAREHOUSE_ID"
+echo "  KA endpoint: $KA_ENDPOINT_NAME"
+echo "  Care Gap:    databricks-claude-sonnet-4-6 (FMAPI)"
 echo ""
 echo "  Next steps:"
-echo "  1. Open the app and run Job 1 (Data Setup)"
-echo "  2. Run Job 2 (AI Setup) after Job 1 completes"
+echo "  1. Open the app → run Job 1 (Data Setup)"
+echo "  2. Run Job 2 (Knowledge Assistant Setup) after Job 1 completes"
 echo "═══════════════════════════════════════════════════"

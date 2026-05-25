@@ -8,9 +8,6 @@ variables:
   schema:
     default: icd10_care_gap
     description: Schema name (single schema used for all tables and the icd10_reference_pdfs volume)
-  ai_gateway_route:
-    default: care-gap-advisor
-    description: AI Gateway route name for the care gap model
   warehouse_id:
     default: "<your-warehouse-id>"
     description: >
@@ -18,33 +15,38 @@ variables:
       Referenced in app/app.yaml resources block — databricks apps deploy
       automatically grants the app SP CAN_USE on this warehouse.
   data_setup_job_name:
-    default: "ICD-10 Gap Demo — Data Setup"
+    default: "ICD-10 Gap — Data Setup"
     description: Job 1 — catalog creation + patient data + PDF upload (standard cluster, FUSE mounts)
   ai_setup_job_name:
-    default: "ICD-10 Gap Demo — AI Setup"
-    description: Job 2 — Knowledge Assistant + AI Gateway (serverless, SDK only)
-  secret_scope:
-    default: care-gap-demo
-    description: Databricks secret scope containing anthropic-api-key (used by AI Setup if model_provider=anthropic)
-  model_provider:
-    default: databricks
-    description: Foundation model provider for care gap route — "databricks" (FMAPI, no key needed) or "anthropic" (external key via secret scope)
+    default: "ICD-10 Gap — KA Setup"
+    description: Job 2 — Upload ICD-10 PDFs to UC Volume and attach to Knowledge Assistant (serverless)
   app_service_principal:
     default: ""
     description: >
-      Application ID (client_id UUID) of the Databricks App service principal.
-      Do not hardcode — deploy.sh reads this from the live app after apps deploy.
+      Application ID (client_id UUID) of the Databricks App service principal. Do not hardcode — deploy.sh reads this from the live app after apps deploy.
       Pass via: databricks bundle deploy --var="app_service_principal=$(databricks apps get icd10-gap-advisor ... | jq -r .service_principal_client_id)"
-  ka_name:
+  fmapi_endpoint:
+    default: "databricks-claude-sonnet-4-6"
+    description: Databricks Foundation Model API endpoint used by the Care Gap Advisor.
+  ka_display_name:
     default: "ICD-10 Clinical Reference Assistant"
-    description: Display name of the Databricks Knowledge Assistant created in setup step 4
+    description: >
+      Display name of the Knowledge Assistant to use. setup_resources.py looks this up at deploy time, finds or creates the KA,
+      and resolves the serving endpoint name automatically.
+  ka_endpoint_name:
+    default: "ka-0eccc75d-endpoint"
+    description: >
+      Serving endpoint name of the Knowledge Assistant. Resolved and updated at deploy time by setup_resources.py.
+      The default here acts as a fallback if setup_resources.py cannot run locally.
+  ka_name:
+    default: "knowledge-assistants/0eccc75d-1554-49de-85a5-903258e712e3"
+    description: >
+      Resource name of the Knowledge Assistant (knowledge-assistants/<uuid> format). Resolved at deploy time by setup_resources.py.
+      Used directly by the app to call the knowledge-sources API without needing list permissions.
   pdf_github_url:
     default: "https://github.com/kuldeep-in/icd10-gapanalysis-demo/tree/main/data/icd10_pdfs"
     description: >
       GitHub tree URL of the directory containing ICD-10 PDF reference files.
-      The notebook uses the GitHub Contents API to list and stream-download all PDFs
-      directly into the Unity Catalog Volume — no local storage or bundle packaging needed.
-      Format: https://github.com/<owner>/<repo>/tree/<branch>/<path>
 
 targets:
   dev:
