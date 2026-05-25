@@ -3,17 +3,15 @@ bundle:
 
 variables:
   catalog:
-    default: my_catalog
+    default: classic_stable_kuldeep
     description: Unity Catalog name
   schema:
-    default: icd10_care_gap
+    default: icd10_care_gap02
     description: Schema name (single schema used for all tables and the icd10_reference_pdfs volume)
   warehouse_id:
     default: "<your-warehouse-id>"
     description: >
-      SQL warehouse ID used by the Databricks App for Delta queries.
-      Referenced in app/app.yaml resources block — databricks apps deploy
-      automatically grants the app SP CAN_USE on this warehouse.
+      SQL warehouse ID used by the Databricks App for Delta queries. Referenced in app/app.yaml resources block — databricks apps deploy automatically grants the app SP CAN_USE on this warehouse.
   data_setup_job_name:
     default: "ICD-10 Gap — Data Setup"
     description: Job 1 — catalog creation + patient data + PDF upload (standard cluster, FUSE mounts)
@@ -34,15 +32,13 @@ variables:
       Display name of the Knowledge Assistant to use. setup_resources.py looks this up at deploy time, finds or creates the KA,
       and resolves the serving endpoint name automatically.
   ka_endpoint_name:
-    default: "ka-0eccc75d-endpoint"
+    default: ""
     description: >
-      Serving endpoint name of the Knowledge Assistant. Resolved and updated at deploy time by setup_resources.py.
-      The default here acts as a fallback if setup_resources.py cannot run locally.
+      Serving endpoint name of the Knowledge Assistant. Always resolved at deploy time by setup_resources.py — never set manually.
   ka_name:
-    default: "knowledge-assistants/0eccc75d-1554-49de-85a5-903258e712e3"
+    default: ""
     description: >
-      Resource name of the Knowledge Assistant (knowledge-assistants/<uuid> format). Resolved at deploy time by setup_resources.py.
-      Used directly by the app to call the knowledge-sources API without needing list permissions.
+      Resource name of the Knowledge Assistant (knowledge-assistants/<uuid> format). Always resolved at deploy time by setup_resources.py — never set manually.
   pdf_github_url:
     default: "https://github.com/kuldeep-in/icd10-gapanalysis-demo/tree/main/data/icd10_pdfs"
     description: >
