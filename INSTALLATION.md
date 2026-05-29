@@ -5,6 +5,40 @@ from running `deploy.sh` through having a fully operational app.
 
 ---
 
+## Deployment Overview
+
+```mermaid
+flowchart LR
+    subgraph PRE["Pre-deployment (one-time)"]
+        YAML["Edit databricks.yml\nset workspace.host"]
+    end
+
+    subgraph DEPLOY["deploy.sh  —  8 steps"]
+        direction TB
+        S3["③ Resolve infrastructure\nWarehouse · KA · VS endpoint"]
+        S4["④ Generate app.yaml"]
+        S5["⑤ Deploy Databricks App"]
+        S6["⑥ Grant SP permissions"]
+        S7["⑦ Sync setup notebooks"]
+        S8["⑧ Bundle deploy\nJob 1 + Job 2"]
+        S3 --> S4 --> S5 --> S6 --> S7 --> S8
+    end
+
+    subgraph POST["Post-deployment (in app)"]
+        direction TB
+        J1["Run Job 1\nData Setup\n4 tasks"]
+        J2["Run Job 2\nKA Setup\n2 tasks"]
+        READY["✅ App Ready\nAll 7 setup steps green"]
+        J1 --> J2 --> READY
+    end
+
+    YAML --> DEPLOY --> POST
+```
+
+---
+
+---
+
 ## Pre-Installation — Configuration Values to Update
 
 Only **one file** needs editing before deployment: `databricks.yml`. Everything else —
@@ -190,6 +224,39 @@ Three-column layout:
 - **Configuration** — Read-only env vars from `app.yaml` (catalog, schema, endpoints, VS index name).
 - **Job 1 — Data Setup** — Steps 1–4: catalog, rules, patients, VS index. Prerequisites: SQL Warehouse + VS Endpoint.
 - **Job 2 — KA Setup** — Steps 5–7: ICD-10 PDFs, KA source attachment, sync status. Prerequisite: KA Endpoint.
+
+---
+
+## Setup Jobs Overview
+
+```mermaid
+flowchart TB
+    subgraph J1["Job 1 — Data Setup  (run first)"]
+        direction TB
+        T1["01 create_catalog\nUC catalog · schema · tables · volume · grants"]
+        T2["02 setup_care_gap_rules\n20 evidence-based rules"]
+        T3["02 ingest_patient_data\n25 synthetic SOAP records"]
+        T4["06 create_vs_index\nembedding_text · VS index · sync"]
+        T1 --> T2 & T3
+        T2 --> T4
+    end
+
+    subgraph J2["Job 2 — KA Setup  (run after Job 1)"]
+        direction TB
+        T5["03 load_icd10_pdfs\nGitHub PDFs → UC Volume"]
+        T6["04 configure_knowledge_source\nattach volume to KA · trigger PDF sync"]
+        T5 --> T6
+    end
+
+    J1 -->|"prerequisite"| J2
+
+    J1 -.->|"unlocks"| CGA["🩺 Care Gap Advisor\n(VS + FMAPI ready)"]
+    J2 -.->|"unlocks"| ICD["🔬 ICD-10 Analyzer\n(KA indexing in progress)"]
+```
+
+> Job 1 and Job 2 are independent workflows — Job 2 can start as soon as Job 1 completes.
+> The Care Gap Advisor is fully operational after Job 1. ICD-10 PDF citations improve
+> progressively as the Knowledge Assistant indexes PDFs (20–60 min asynchronously).
 
 ---
 

@@ -1,40 +1,85 @@
 # ICD-10 Gap Analysis Demo
 
 A Databricks App that performs ICD-10 clinical coding and care gap identification on
-synthetic patient records.
+synthetic patient records using the Databricks AI stack.
 
-- **ICD-10 Analyzer** — selects a patient, loads their SOAP note, and returns ICD-10 code
-  suggestions with citations sourced from uploaded reference PDFs (powered by the Databricks
-  Knowledge Assistant).
+- **ICD-10 Analyzer** — loads a patient's SOAP note and returns ICD-10 code suggestions
+  with PDF citations (powered by the Databricks Knowledge Assistant).
 - **Care Gap Advisor** — identifies evidence-based care gaps (ADA, ACC/AHA, GOLD, NCCN,
-  KDIGO) from the patient's clinical notes using the Foundation Model API
-  (`databricks-claude-sonnet-4-6`).
+  KDIGO) via semantic rule retrieval (Vector Search) + AI analysis (Claude Sonnet).
 
 ---
 
-## Architecture
+## System Architecture
 
+```mermaid
+graph TB
+    U["👤 Clinician"]
+
+    subgraph APP["Databricks App — icd10-gap-advisor"]
+        direction LR
+        HOME["🏠 Home\nPatient overview\n+ stats"]
+        ICD["🔬 ICD-10 Analyzer\nSOAP note → codes\n+ PDF citations"]
+        GAP["🩺 Care Gap Advisor\nSemantic rule retrieval\n+ AI analysis"]
+        STP["⚙ Setup\nConfiguration\n+ job triggers"]
+    end
+
+    subgraph AI["Databricks AI Services"]
+        FMAPI["Foundation Model API\ndatabricks-claude-sonnet-4-6\n(ICD-10 coding + care gaps)"]
+        KA["Knowledge Assistant\nICD-10 Reference PDFs\n(RAG-based code citations)"]
+        VS["Vector Search\ncare_gap_rules_vs_index\n(semantic rule retrieval)"]
+    end
+
+    subgraph UC["Unity Catalog"]
+        WH["SQL Warehouse"]
+        PR[("patient_records\n25 synthetic SOAP notes")]
+        CGR[("care_gap_rules\n20 evidence-based rules")]
+        CGF[("care_gap_findings")]
+        ICDR[("icd10_analysis_results")]
+        BS[("bootstrap_status")]
+        VOL[/"UC Volume\nicd10_reference_pdfs"/]
+    end
+
+    U --> APP
+    ICD -->|"note → codes + citations"| KA
+    ICD -->|"structured coding"| FMAPI
+    GAP -->|"semantic retrieval\ntop-15 relevant rules"| VS
+    GAP -->|"rules + note → gaps"| FMAPI
+    APP -->|"Delta queries"| WH
+    WH --- PR & CGR & CGF & ICDR & BS
+    KA -.->|"indexes PDFs"| VOL
+    VS -.->|"embeddings from"| CGR
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Databricks App (Dash)                     │
-│   icd10-gap-advisor                                         │
-│                                                             │
-│   Home tab         — setup status + job triggers            │
-│   ICD-10 Analyzer  — Knowledge Assistant (RAG over PDFs)    │
-│   Care Gap Advisor — Foundation Model API (Claude Sonnet)   │
-└──────┬─────────────────────┬──────────────────┬─────────────┘
-       │                     │                  │
-  SQL Warehouse          KA Endpoint       FMAPI Endpoint
-  (Delta queries)   (ICD-10 code RAG)  (databricks-claude-
-       │                                  sonnet-4-6)
-       │
-  Unity Catalog: <catalog>.<schema>
-  ├── patient_records          (25 synthetic SOAP notes)
-  ├── care_gap_rules           (20 evidence-based rules)
-  ├── icd10_analysis_results   (runtime — populated by app)
-  ├── care_gap_findings        (runtime — populated by app)
-  ├── bootstrap_status         (setup state tracker)
-  └── Volume: icd10_reference_pdfs  (ICD-10 PDFs → KA)
+
+---
+
+## Deployment Architecture
+
+```mermaid
+flowchart TD
+    DYML[("databricks.yml\nsingle source of truth")]
+
+    subgraph DS["deploy.sh  —  8-step orchestrator"]
+        direction TB
+        S1["① Read defaults from\ndatabricks.yml"]
+        S2["② Derive workspace\napp path via bundle"]
+        S3["③ Resolve / create\nWarehouse · KA · VS endpoint"]
+        S4["④ Generate & upload\napp.yaml"]
+        S5["⑤ Deploy Databricks App\n(provisions app SP)"]
+        S6["⑥ Grant SP permissions\nWarehouse · KA · VS"]
+        S7["⑦ Sync setup notebooks\nworkspace → local"]
+        S8["⑧ Bundle deploy\ncreates Job 1 + Job 2"]
+    end
+
+    subgraph WS["Workspace (created by deploy.sh)"]
+        APP["icd10-gap-advisor\nDatabricks App"]
+        J1["Job 1\nData Setup"]
+        J2["Job 2\nKA Setup"]
+    end
+
+    DYML --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+    S5 --> APP
+    S8 --> J1 & J2
 ```
 
 ---
@@ -43,13 +88,13 @@ synthetic patient records.
 
 | Requirement | Details |
 |---|---|
-| Databricks workspace | Unity Catalog enabled; user has `CREATE CATALOG` privilege (or catalog pre-created) |
-| Databricks CLI | Installed and authenticated (`databricks configure` or existing profile) |
+| Databricks workspace | Unity Catalog enabled; user has `CREATE CATALOG` privilege |
+| Databricks CLI | Installed and authenticated |
 | Python | 3.8+ stdlib only — no additional packages required |
 | Terraform | Installed locally — required by `databricks bundle deploy` |
 
-> **SQL Warehouse and Knowledge Assistant** are resolved automatically by `setup_resources.py`
-> during deployment. You do not need to create them in advance.
+> **SQL Warehouse, Knowledge Assistant, and Vector Search endpoint** are all resolved or
+> auto-created by `setup_resources.py`. Nothing needs to be provisioned in advance.
 
 ---
 
@@ -62,40 +107,36 @@ cd icd10-gapanalysis-demo
 # 1. Update workspace host in databricks.yml
 #    targets.dev.workspace.host: https://adb-<id>.azuredatabricks.net
 
-# 2. Deploy — warehouse and KA are auto-resolved
+# 2. Deploy — all infrastructure is auto-resolved
 chmod +x deploy.sh
-./deploy.sh --profile DEFAULT \
-            --catalog my_catalog \
-            --app-path /Workspace/Users/you@example.com/icd10-gapanalysis-demo/app
+./deploy.sh --profile DEFAULT
 ```
 
-Then open the app URL from the Databricks Apps UI and follow the setup steps in the Home tab.
+Then open the app URL from the Databricks Apps UI and click **⚙ Setup** in the navbar to
+run Job 1 (Data Setup) and Job 2 (KA Setup).
 
-For a full walkthrough of each deployment stage, what gets created, and how to use each
-app tab, see **[INSTALLATION.md](INSTALLATION.md)**.
+For a full walkthrough of each deployment stage and how to use each app feature, see
+**[INSTALLATION.md](INSTALLATION.md)**.
 
 ---
 
 ## Configuration
 
-All configurable values live in `databricks.yml` as bundle variables. `deploy.sh` reads
-them at startup, resolves infrastructure (warehouse, KA endpoint), and injects final values
-into `app.yaml` and the bundle — no manual editing of `app.yaml` is needed.
-
-Override any variable at deploy time with a `deploy.sh` flag or a `--var` passed directly
-to `databricks bundle deploy`.
+All configurable values live in `databricks.yml`. `deploy.sh` reads them at startup,
+resolves infrastructure, and injects final values into `app.yaml` — no manual editing needed.
 
 | Variable | Default | Description |
 |---|---|---|
 | `catalog` | `my_catalog` | Unity Catalog name |
-| `schema` | `icd10_care_gap` | Schema for all tables and the UC volume |
+| `schema` | `icd10_care_gap` | Schema for all tables and the UC Volume |
 | `warehouse_id` | `""` | SQL Warehouse ID — auto-created if empty |
-| `ka_display_name` | `ICD-10 Clinical Reference Assistant` | Display name of the Knowledge Assistant — looked up by `setup_resources.py`; created if not found |
-| `ka_endpoint_name` | `""` | KA serving endpoint name — resolved automatically at deploy time; do not set manually |
-| `ka_name` | `""` | KA resource name (`knowledge-assistants/<uuid>`) — resolved automatically at deploy time; do not set manually |
-| `data_setup_job_name` | `ICD-10 Gap Demo — Data Setup` | Display name for Job 1 |
-| `ai_setup_job_name` | `ICD-10 Gap Demo — AI Setup` | Display name for Job 2 |
-| `app_service_principal` | `""` | App SP UUID — resolved automatically by `deploy.sh`, never hardcode |
+| `vs_endpoint_name` | `rag_pdf_vs_endpoint` | VS endpoint for care gap rule retrieval — created if not found |
+| `ka_display_name` | `ICD-10 Clinical Reference Assistant` | KA display name — looked up or created |
+| `ka_endpoint_name` | `""` | Resolved automatically at deploy time |
+| `ka_name` | `""` | Resolved automatically at deploy time |
+| `fmapi_endpoint` | `databricks-claude-sonnet-4-6` | Foundation Model API endpoint |
+| `data_setup_job_name` | `ICD-10 Gap — Data Setup` | Job 1 display name |
+| `ai_setup_job_name` | `ICD-10 Gap — KA Setup` | Job 2 display name |
 
 ---
 
@@ -103,77 +144,91 @@ to `databricks bundle deploy`.
 
 ```
 icd10-gapanalysis-demo/
-├── databricks.yml                          # Bundle config — single source of truth for all variables
-├── deploy.sh                               # Full deployment script (6-step, self-contained)
-├── setup_resources.py                      # Pre-deploy: resolves SQL warehouse + KA endpoint
+├── databricks.yml          # Bundle config — single source of truth for all variables
+├── deploy.sh               # 8-step deployment orchestrator
+├── setup_resources.py      # Pre-deploy: resolves SQL Warehouse + KA + VS endpoints
 ├── README.md
-├── INSTALLATION.md                         # Stage-by-stage deployment and usage guide
+├── INSTALLATION.md         # Stage-by-stage deployment and usage guide
+├── LOCAL.md                # Git-ignored personal notes (safe for local use)
 ├── resources/
-│   ├── workflows.yml                       # Job 1 (Data Setup) + Job 2 (AI Setup)
-│   └── ai_gateway.yml                      # AI Gateway reference (created by Job 2)
+│   └── workflows.yml       # Job 1 (Data Setup) + Job 2 (KA Setup) definitions
 ├── app/
-│   ├── app.py                              # Dash app — Home, ICD-10 Analyzer, Care Gap Advisor
-│   ├── app.yaml                            # Generated by deploy.sh — do not edit manually
-│   └── requirements.txt                    # Python dependencies for the app
+│   ├── app.py              # Dash app — routing, navbar, global layout
+│   ├── app.yaml            # Generated by deploy.sh — do not edit manually
+│   ├── requirements.txt    # Python dependencies
+│   ├── config.py           # Env vars, BOOTSTRAP_STEPS, STATUS_META constants
+│   ├── db.py               # SQL helpers — patient, rules, findings CRUD
+│   ├── tab_home.py         # Home tab — patient accordion + stats tiles
+│   ├── tab_icd10.py        # ICD-10 Analyzer tab
+│   ├── tab_caregap.py      # Care Gap Advisor tab — VS retrieval + AI analysis
+│   └── tab_setup.py        # Setup page — 3-column layout, job triggers
 ├── setup/
-│   ├── 01_create_catalog.py                # UC catalog, schema, tables, volume, grants
-│   ├── 02_setup_care_gap_rules.py          # Seed care_gap_rules with 20 evidence-based rules
-│   ├── 02_ingest_patient_json.py           # patient_records.json → patient_records table
-│   ├── 03_load_icd10_pdfs_to_volume.py     # PDFs from GitHub → icd10_reference_pdfs volume
-│   ├── 04_configure_knowledge_source.py    # Attach UC volume to pre-existing KA, trigger sync
-│   └── 05_configure_ai_gateway.py          # AI Gateway / FMAPI serving endpoint
+│   ├── 01_create_catalog.py               # UC catalog, schema, tables, volume, grants
+│   ├── 02_setup_care_gap_rules.py         # Seed care_gap_rules (20 HEDIS/ADA/ACC rules)
+│   ├── 02_ingest_patient_json.py          # patient_records.json → Delta table
+│   ├── 03_load_icd10_pdfs_to_volume.py    # PDFs → icd10_reference_pdfs UC Volume
+│   ├── 04_configure_knowledge_source.py   # Attach UC Volume to KA, trigger PDF sync
+│   ├── 05_configure_ai_gateway.py         # Optional: Anthropic AI Gateway route
+│   └── 06_create_care_gap_vs_index.py     # VS index on care_gap_rules (embedding_text)
 └── data/
-    ├── patient_records.json                # 25 synthetic SOAP-format clinical records
-    └── icd10_pdfs/                         # ICD-10 reference PDFs (loaded from GitHub by Job 1)
+    ├── patient_records.json               # 25 synthetic SOAP-format clinical records
+    └── icd10_pdfs/                        # ICD-10 reference PDFs (loaded by Job 2)
 ```
+
+---
+
+## How ICD-10 Analysis Works
+
+1. User selects a patient — SOAP note loads from `patient_records`
+2. Clicks **Analyze ICD-10 Codes**
+3. App sends the note to **Claude Sonnet** (FMAPI) which returns a structured JSON array
+   of ICD-10 codes with type (Primary/Secondary) and confidence (HIGH/MEDIUM/LOW)
+4. User reviews codes and clicks **Save** — stored to `icd10_analysis_results`
 
 ---
 
 ## How Care Gap Analysis Works
 
-The Care Gap Advisor uses the **Databricks Foundation Model API** (`databricks-claude-sonnet-4-6`) — no external API keys or AI Gateway required.
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant App as Databricks App
+    participant VS as Vector Search
+    participant AI as Claude Sonnet
+    participant DB as SQL Warehouse
 
-When a user selects a patient and clicks Analyze, the app:
+    U->>App: Select patient + click Identify Care Gaps
+    App->>DB: Load patient SOAP note
+    App->>VS: Query with clinical note (top-15 rules)
+    VS-->>App: Most semantically relevant rules
+    App->>AI: Patient note + retrieved rules
+    AI-->>App: Applicable gaps (finding + action + guideline)
+    App->>U: Display care gap cards
+    U->>App: Save finding
+    App->>DB: Write to care_gap_findings
+```
 
-1. Queries `patient_records` via the SQL Warehouse to load the patient's full SOAP note
-2. Queries `care_gap_rules` to load all active evidence-based rules
-3. Constructs a prompt that includes both the SOAP note and the full rule set
-4. Sends the prompt to `databricks-claude-sonnet-4-6` via the FMAPI serving endpoint
-5. The model evaluates the clinical note against each rule and returns identified care gaps with reasoning
-6. Results are written to `care_gap_findings` and displayed in the app
+Vector Search retrieves rules semantically — a note mentioning "HbA1c 9.2%, metformin BID"
+surfaces T2DM rules without needing ICD-10 codes. This means patients with no saved ICD-10
+codes get the same retrieval quality as coded patients.
 
-The rules are small enough (20 rows) to fit directly in the model's context window — there is no vector search involved. This means:
+**To add or update rules:** insert/update rows in `care_gap_rules` then trigger a VS sync.
+No code changes or redeployment needed.
 
-- **Add a new guideline** → insert a row in `care_gap_rules` with SQL
-- **Update a rule** → update the row
-- **Disable a rule** → set `is_active = false`
-
-Changes take effect immediately on the next analysis — no code change or redeployment needed.
-
----
-
-## How ICD-10 Code Suggestions Work
-
-The ICD-10 Analyzer uses the **Databricks Knowledge Assistant** — a managed RAG service that indexes the uploaded ICD-10 reference PDFs into a vector store.
-
-When a user submits a clinical note:
-
-1. The app sends the text to the KA serving endpoint
-2. The KA performs semantic search over the indexed PDFs
-3. It returns relevant ICD-10 codes with citations from the source documents
-
-PDF indexing runs asynchronously after Job 2 attaches the UC Volume to the KA (typically 20–60 minutes). The Home tab step 6 shows live indexing status via the KA management API.
+```sql
+-- Add a new rule
+INSERT INTO catalog.schema.care_gap_rules
+VALUES ('CGR-021', 'T2DM', 'Statin Therapy', 'ADA 2024',
+        'Statin prescribed for T2DM patients aged 40–75', 'HIGH');
+```
 
 ---
 
 ## Notes
 
-- `setup_resources.py` runs **before** the app is deployed. It looks up the Knowledge
-  Assistant by display name using `GET /api/2.1/knowledge-assistants`, reads the
-  `endpoint_name` and resource `name` from the response, and passes both into `app.yaml`
-  and the bundle. If no KA with that display name exists, a new one is created automatically.
-- Volume attachment and PDF indexing are handled by Job 2, task `configure_knowledge_source`
-  — not by `setup_resources.py`. This keeps pre-deploy lightweight and idempotent.
-- Home tab setup checks use live API calls — the KA source status is read directly from
-  `GET /api/2.1/{ka-name}/knowledge-sources`, not from a Delta table.
-- All setup notebooks are idempotent and safe to re-run.
+- `setup_resources.py` runs **before** the app is deployed. It resolves the KA by display
+  name via `GET /api/2.1/knowledge-assistants` and the VS endpoint via
+  `GET /api/2.0/vector-search/endpoints/{name}`. Both are created automatically if not found.
+- All setup notebooks are **idempotent** — safe to re-run at any time.
+- `deploy.sh` syncs setup notebooks from the workspace before running `databricks bundle deploy`,
+  so the bundle always has the latest notebook versions and never deletes workspace files.
