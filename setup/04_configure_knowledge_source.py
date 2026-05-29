@@ -50,6 +50,17 @@ print(f"KA endpoint:    {KA_ENDPOINT_NAME}")
 
 # COMMAND ----------
 
+# Reset KA sync cache so the app re-polls the KA API until indexing completes again.
+# The app caches ka_source_sync = COMPLETED in bootstrap_status once indexing finishes.
+# Deleting that row here ensures a re-run of this job triggers fresh polling.
+spark.sql(f"""
+    DELETE FROM `{CATALOG}`.`{SCHEMA}`.bootstrap_status
+    WHERE step = 'ka_source_sync'
+""")
+print("ka_source_sync cache cleared — app will re-poll KA API until indexing completes")
+
+# COMMAND ----------
+
 # Verify PDFs are present in the volume before attaching
 try:
     pdf_files = [f for f in dbutils.fs.ls(VOLUME_PATH) if f.name.lower().endswith(".pdf")]
@@ -156,14 +167,14 @@ details = json.dumps({
 
 spark.sql(f"""
     MERGE INTO `{CATALOG}`.`{SCHEMA}`.bootstrap_status AS t
-    USING (SELECT 'ka_configured_with_icd10_files' AS step) AS s ON t.step = s.step
+    USING (SELECT 'ka_source_configured' AS step) AS s ON t.step = s.step
     WHEN MATCHED THEN UPDATE SET
         status     = 'COMPLETED',
         updated_at = current_timestamp(),
         details    = '{details}'
     WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
-        VALUES ('ka_configured_with_icd10_files', 'COMPLETED', current_timestamp(), '{details}')
+        VALUES ('ka_source_configured', 'COMPLETED', current_timestamp(), '{details}')
 """)
 
-print(f"\nStep complete — bootstrap_status updated: ka_configured_with_icd10_files → COMPLETED")
+print(f"\nStep complete — bootstrap_status updated: ka_source_configured → COMPLETED")
 print(f"KA endpoint: {KA_ENDPOINT_NAME}")

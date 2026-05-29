@@ -37,32 +37,12 @@ targets:
 |----------|---------|----------------|
 | `catalog` | `my_catalog` | If your catalog has a different name |
 | `schema` | `icd10_care_gap` | If you want a different schema name |
-| `warehouse_id` | `""` | Set to an existing warehouse ID to skip auto-creation |
+| `warehouse_id` | `""` (auto-created) | Set to an existing warehouse ID to skip auto-creation |
 | `ka_display_name` | `ICD-10 Clinical Reference Assistant` | Change if you want a different KA name |
-| `model_provider` | `databricks` | Set to `anthropic` to use an external Anthropic key |
-| `ai_gateway_route` | `care-gap-advisor` | Only relevant if `model_provider=anthropic` |
+| `vs_endpoint_name` | `rag_pdf_vs_endpoint` | VS endpoint for care gap rule retrieval. Use an existing ONLINE endpoint or provide a new name — `setup_resources.py` creates it if it doesn't exist |
 
 > **`app.yaml` — do not edit.** It is overwritten by `deploy.sh` at every deploy. All
 > environment variables are injected from resolved values at deploy time.
-
----
-
-### Optional — Anthropic API Key (Anthropic mode only)
-
-By default the app uses the `databricks-claude-sonnet-4-6` Foundation Model API — **no
-API key is required**. If you want to route care gap analysis through an external
-Anthropic key instead:
-
-```bash
-# Create the secret scope
-databricks secrets create-scope care-gap-demo --profile DEFAULT
-
-# Store the Anthropic API key
-databricks secrets put-secret care-gap-demo anthropic-api-key --profile DEFAULT
-# (enter your Anthropic API key when prompted)
-```
-
-Then pass `--model-provider anthropic` to `deploy.sh`.
 
 ---
 
@@ -71,7 +51,6 @@ Then pass `--model-provider anthropic` to `deploy.sh`.
 - [ ] `databricks.yml` — `workspace.host` updated to your workspace URL
 - [ ] Databricks CLI authenticated: `databricks auth profiles` shows a valid profile
 - [ ] Terraform installed: `terraform -version` returns a version
-- [ ] *(Anthropic mode only)* Secret scope `care-gap-demo` created with key `anthropic-api-key`
 
 ---
 
@@ -81,63 +60,48 @@ Then pass `--model-provider anthropic` to `deploy.sh`.
 
 ```bash
 chmod +x deploy.sh
-./deploy.sh --profile DEFAULT \
-            --catalog my_catalog \
-            --app-path /Workspace/Users/you@example.com/icd10-gapanalysis-demo/app
+./deploy.sh --profile DEFAULT
 ```
 
-All flags are optional except `--app-path`. Defaults are read from `databricks.yml`.
+All flags are optional — defaults are read from `databricks.yml`. The workspace app path is derived automatically from the bundle configuration.
 
 | Flag | Default (from `databricks.yml`) | Description |
 |------|---------------------------------|-------------|
-| `--app-path` | *(required)* | Workspace path to the `app/` directory |
 | `--profile` | `DEFAULT` | Databricks CLI profile |
 | `--catalog` | `my_catalog` | Unity Catalog name |
 | `--schema` | `icd10_care_gap` | Schema name |
 | `--warehouse-id` | `""` (auto-created) | SQL Warehouse ID |
 | `--ka-display-name` | `ICD-10 Clinical Reference Assistant` | KA display name |
-| `--ai-gateway-route` | `care-gap-advisor` | AI Gateway route name |
-| `--model-provider` | `databricks` | `databricks` or `anthropic` |
 
 ### What deploy.sh does — step by step
 
 #### Step 1 — Read defaults from `databricks.yml`
 
-All variable defaults are parsed from `databricks.yml` via a Python heredoc. Command-line
-flags then override any of these values. No values are hardcoded in `deploy.sh`.
+All variable defaults are parsed from `databricks.yml`. Command-line flags override them.
 
-#### Step 2 — Resolve SQL warehouse and KA endpoint (`setup_resources.py`)
+#### Step 2 — Derive workspace app path
 
-`setup_resources.py` is called with the resolved config. It outputs two shell variable
-assignments consumed via `eval`:
+Runs `databricks bundle validate` against the local `databricks.yml` to read `workspace.file_path`, then appends `/app`. No manual path flag needed.
 
-**SQL Warehouse resolution:**
+#### Step 3 — Resolve SQL warehouse, KA endpoint, VS endpoint (`setup_resources.py`)
 
-| Condition | Action |
-|-----------|--------|
-| `warehouse_id` is set and valid | Validates it exists; uses it |
-| `warehouse_id` is empty or invalid | Creates a new serverless SQL Warehouse named `icd10-gap-demo-warehouse` |
+| Resource | Condition | Action |
+|----------|-----------|--------|
+| SQL Warehouse | `warehouse_id` set and valid | Uses it |
+| SQL Warehouse | Empty or invalid | Creates a new serverless warehouse |
+| KA endpoint | KA with matching `display_name` found | Reads `endpoint_name` — no creation needed |
+| KA endpoint | Not found | Creates a new KA, waits for `READY` state |
+| VS endpoint | `vs_endpoint_name` exists and is ONLINE | Uses it |
+| VS endpoint | Not found | Creates it, waits for ONLINE state (~30s) |
 
-**Knowledge Assistant endpoint resolution:**
+> The VS index name (`<catalog>.<schema>.care_gap_rules_vs_index`) is derived at runtime from the catalog and schema env vars — it is never stored as a separate variable. The index itself is created by Job 1, not here.
 
-| Condition | Action |
-|-----------|--------|
-| KA with matching `display_name` found | Reads `endpoint_name` from the API response — no creation needed |
-| Multiple KAs with same display name | Uses the most recently created one (sorted by `create_time`) |
-| No KA with that display name found | Creates a new KA via `POST /api/2.1/knowledge-assistants`, waits for endpoint to be `READY` |
+#### Step 4 — Generate `app.yaml`
 
-> Volume attachment and PDF indexing are **not** done here — that is Job 2's responsibility.
-> `setup_resources.py` only ensures the KA serving endpoint exists and is reachable.
-
-After this step, `WAREHOUSE_ID` and `KA_ENDPOINT_NAME` are set in the shell environment.
-
-#### Step 3 — Generate `app.yaml`
-
-`deploy.sh` writes a fresh `app.yaml` with all resolved values and uploads it to the
-workspace path. This file is the runtime configuration for the Databricks App.
+Writes a fresh `app.yaml` with all resolved values and uploads it to the workspace path.
+Current generated format:
 
 ```yaml
-# Generated by deploy.sh — do not edit manually
 command: ["python", "app.py"]
 
 env:
@@ -145,20 +109,20 @@ env:
     value: "<resolved catalog>"
   - name: UC_SCHEMA
     value: "<resolved schema>"
-  - name: AI_GATEWAY_ROUTE
-    value: "<resolved ai_gateway_route>"
   - name: DATABRICKS_WAREHOUSE_ID
     value: "<resolved warehouse_id>"
+  - name: FMAPI_ENDPOINT
+    value: "databricks-claude-sonnet-4-6"
   - name: KA_ENDPOINT_NAME
     value: "<resolved ka_endpoint_name>"
+  - name: KA_NAME
+    value: "<resolved ka_name>"
   - name: DATA_SETUP_JOB_NAME
     value: "<resolved data_setup_job_name>"
   - name: AI_SETUP_JOB_NAME
     value: "<resolved ai_setup_job_name>"
-  - name: MODEL_PROVIDER
-    value: "<resolved model_provider>"
-  - name: SECRET_SCOPE
-    value: "<resolved secret_scope>"
+  - name: VS_ENDPOINT_NAME
+    value: "<resolved vs_endpoint_name>"
 
 resources:
   - name: sql-warehouse
@@ -167,63 +131,41 @@ resources:
       permission: "CAN_USE"
 ```
 
-#### Step 4 — Deploy the Databricks App
+`VS_INDEX_NAME` is set to the deterministic index path. The app reads this at startup and
+uses it for every Care Gap VS query. The index itself is created by Job 1, Task 4 — not here.
 
-```bash
-databricks apps deploy icd10-gap-advisor \
-  --source-code-path <app-path> \
-  --mode SNAPSHOT
-```
+#### Step 5 — Deploy the Databricks App
 
-This creates (or updates) the `icd10-gap-advisor` Databricks App and provisions its
-dedicated service principal.
+Creates or updates `icd10-gap-advisor` and provisions its dedicated service principal.
 
-#### Step 5 — Grant warehouse CAN_USE to app service principal
+#### Step 6 — Grant permissions to app service principal
 
-```bash
-databricks apps get icd10-gap-advisor   # → reads service_principal_client_id
-databricks permissions update warehouses <warehouse-id> \
-  --json '{"access_control_list": [{"service_principal_name": "<sp-id>", "permission_level": "CAN_USE"}]}'
-```
+| Permission | Resource | How granted |
+|-----------|----------|-------------|
+| `CAN_USE` | SQL Warehouse | `deploy.sh` Step 6 |
+| `CAN_QUERY` | KA serving endpoint | `deploy.sh` Step 6 |
+| `CAN_QUERY` | KA resource | `deploy.sh` Step 6 |
+| `MODIFY` | `bootstrap_status` table | `01_create_catalog` notebook |
+| `CAN_QUERY` | VS endpoint | `06_create_care_gap_vs_index` notebook (Job 1, Task 4) |
 
-The app SP needs `CAN_USE` on the SQL Warehouse to run Delta queries.
+> VS endpoint permissions are granted by Job 1 Task 4 because the app SP must exist
+> (created in Step 5) before it can be granted permissions on existing infrastructure.
 
-#### Step 6 — Deploy the Asset Bundle (Jobs)
+#### Step 7 — Deploy the Asset Bundle (Jobs)
 
-```bash
-databricks bundle deploy \
-  --var="catalog=..." \
-  --var="schema=..." \
-  --var="warehouse_id=..." \
-  --var="ka_endpoint_name=..." \
-  --var="ai_gateway_route=..." \
-  --var="model_provider=..." \
-  --var="secret_scope=..." \
-  --var="data_setup_job_name=..." \
-  --var="ai_setup_job_name=..." \
-  --var="app_service_principal=<sp-id>"
-```
-
-Creates Job 1 (Data Setup) and Job 2 (AI Setup) as Databricks Workflow Jobs, with
-`CAN_MANAGE_RUN` granted to the app SP so the app can trigger them.
+Creates **Job 1 (Data Setup)** and **Job 2 (AI Setup)** as Databricks Workflow Jobs.
 
 ### Resources created after Stage 1
 
-| Resource | Type | Location |
-|----------|------|----------|
-| Databricks App | App | Workspace → Apps → `icd10-gap-advisor` |
+| Resource | Type | Notes |
+|----------|------|-------|
+| Databricks App | App | `icd10-gap-advisor` |
 | App Service Principal | IAM | Auto-created by the app |
 | SQL Warehouse | SQL | Auto-created if not pre-existing |
-| KA Serving Endpoint | Model Serving | Looked up or auto-created by `setup_resources.py` |
-| Job 1: Data Setup | Workflow Job | Workspace → Workflows → `ICD-10 Gap Demo — Data Setup` |
-| Job 2: AI Setup | Workflow Job | Workspace → Workflows → `ICD-10 Gap Demo — AI Setup` |
-
-### Verify
-
-```bash
-databricks apps get icd10-gap-advisor --profile DEFAULT
-databricks jobs list --profile DEFAULT | grep "ICD-10 Gap Demo"
-```
+| KA Serving Endpoint | Model Serving | Looked up or auto-created |
+| Job 1: Data Setup | Workflow Job | Includes VS index task |
+| Job 2: AI Setup | Workflow Job | ICD-10 PDF indexing |
+| VS index | **Not yet** | Created by Job 1, Task 4 |
 
 ---
 
@@ -231,186 +173,268 @@ databricks jobs list --profile DEFAULT | grep "ICD-10 Gap Demo"
 
 **Trigger:** Open the app URL from the Databricks Apps UI.
 
-Navigate to **Workspace → Apps → icd10-gap-advisor** and click **Open**.
-
-### What the app does on startup
-
-1. Reads all config from environment variables set in `app.yaml` (`UC_CATALOG`, `UC_SCHEMA`,
-   `KA_ENDPOINT_NAME`, `DATABRICKS_WAREHOUSE_ID`, etc.).
-2. Queries the `bootstrap_status` Delta table to determine which setup steps are complete.
-3. If `bootstrap_status` does not yet exist (before Job 1 has run), the Home tab shows all
-   six steps in **Not Started** state.
-
 ### What you see
 
-- **Home tab** — Six accordion steps, all showing grey "Not Started" badges.
-- **ICD-10 Analyzer tab** — Disabled until Job 1 completes (steps 1–3).
-- **Care Gap Advisor tab** — Disabled until Job 1 completes (steps 1–2).
-- **Settings tab** — Read-only view of all configured values. All values come from `app.yaml`
-  and are set at deploy time.
+- **Home tab** — Patient accordion (empty until Job 1 completes).
+- **ICD-10 Analyzer** — Requires patients loaded (Job 1, Tasks 1–3).
+- **Care Gap Advisor** — Requires patients + VS index (Job 1, Tasks 1–4).
+- **Setup page** — Configuration + Job 1 / Job 2 trigger buttons. All **7 steps** show **Not Started**.
 
 ---
 
-## Stage 3 — Home Tab Controls
+## Stage 3 — Setup Page
 
-The Home tab is the control panel for all setup operations. It is always accessible.
+Navigate to **Setup** via the ⚙ icon in the navbar.
 
-| Control | Description |
-|---------|-------------|
-| **Run Data Setup (Job 1)** | Triggers Job 1 — creates UC objects, ingests patient data, downloads PDFs |
-| **Run AI Setup (Job 2)** | Triggers Job 2 — attaches the PDF volume to the KA and configures AI Gateway |
-| **Refresh Now** | Re-queries `bootstrap_status` and updates all step badges without a page reload |
-
-Each of the six steps is shown as a collapsible accordion row. Steps are colour-coded:
-- **Grey** — Not started
-- **Yellow** — In progress (job running)
-- **Green** — Completed (written to `bootstrap_status`)
-- **Red** — Failed
+Three-column layout:
+- **Configuration** — Read-only env vars from `app.yaml` (catalog, schema, endpoints, VS index name).
+- **Job 1 — Data Setup** — Steps 1–4: catalog, rules, patients, VS index. Prerequisites: SQL Warehouse + VS Endpoint.
+- **Job 2 — KA Setup** — Steps 5–7: ICD-10 PDFs, KA source attachment, sync status. Prerequisite: KA Endpoint.
 
 ---
 
 ## Stage 4 — Job 1: Data Setup
 
-**Trigger:** Click **Run Data Setup (Job 1)** in the Home tab.
+**Trigger:** Click **Run Data Setup (Job 1)** on the Setup page.
 
-```bash
-# Or trigger manually:
-databricks jobs run-now --job-id <job1-id> --profile DEFAULT
-```
-
-Job 1 runs one sequential task followed by three parallel tasks, all on serverless compute.
+Job 1 runs `create_catalog` first, then **four** parallel tasks on serverless compute.
 
 ### Tasks
 
-#### Task 1: `create_catalog` (runs first)
+#### Task 1: `create_catalog` (runs first, all others depend on it)
 
 Notebook: `setup/01_create_catalog.py`
 
-Creates all Unity Catalog resources and grants. Subsequent tasks depend on this completing.
-
-| Resource | Details |
-|----------|---------|
-| UC Catalog | Created if it does not exist |
+| Resource created | Notes |
+|-----------------|-------|
+| UC Catalog | Skipped if exists |
 | Schema | `<catalog>.<schema>` |
-| `patient_records` | Delta table — 25 synthetic SOAP-format clinical notes |
-| `care_gap_rules` | Delta table — 20 evidence-based care gap rules |
-| `icd10_analysis_results` | Delta table — runtime, populated by ICD-10 Analyzer |
-| `care_gap_findings` | Delta table — runtime, populated by Care Gap Advisor |
-| `bootstrap_status` | Delta table — setup state tracker, read by the Home tab |
-| `icd10_reference_pdfs` | UC Volume — managed volume for ICD-10 reference PDFs |
-| Grants | `CAN_USE` schema + tables granted to the app service principal |
+| `patient_records` | Delta table |
+| `care_gap_rules` | Delta table — CDF enabled by Task 4 |
+| `icd10_analysis_results` | Delta table |
+| `care_gap_findings` | Delta table |
+| `bootstrap_status` | Delta table — setup state tracker |
+| `icd10_reference_pdfs` | UC Volume |
+| App SP grants | SELECT on all tables, MODIFY on `care_gap_findings` and `bootstrap_status` |
 
-#### Tasks 2–4 (parallel, run after `create_catalog`)
+#### Tasks 2–4 (parallel, after `create_catalog`)
 
 | Task | Notebook | What it does |
 |------|----------|--------------|
-| `setup_care_gap_rules` | `setup/02_setup_care_gap_rules.py` | Seeds `care_gap_rules` with 20 evidence-based HEDIS/ACC/ADA rules |
-| `ingest_patient_data` | `setup/02_ingest_patient_json.py` | Writes 25 synthetic patient records to `patient_records` Delta table |
-| `load_icd10_pdfs` | `setup/03_load_icd10_pdfs_to_volume.py` | Downloads ICD-10 reference PDFs from GitHub and streams them into the `icd10_reference_pdfs` UC Volume |
+| `setup_care_gap_rules` | `setup/02_setup_care_gap_rules.py` | Seeds `care_gap_rules` with 20 evidence-based rules |
+| `ingest_patient_data` | `setup/02_ingest_patient_json.py` | Writes 25 synthetic SOAP patient records |
+| `create_vs_index` | `setup/06_create_care_gap_vs_index.py` | **Creates VS index for Care Gap Advisor** (depends on `setup_care_gap_rules`) |
 
-All tasks are idempotent — safe to re-run.
+> `create_vs_index` depends on `setup_care_gap_rules` completing first (the rules table must be populated before it can be indexed). It runs in parallel with `ingest_patient_data`.
 
-### After Job 1 completes
+---
 
-- Home tab steps 1–3 show green **Completed** badges.
-- **Care Gap Advisor** becomes operational — it needs only the patient records, care gap
-  rules, and the Foundation Model API endpoint (all available after Job 1).
-- **ICD-10 Analyzer** tab becomes visible but requires Job 2 to complete before use.
+### Task 4 deep-dive: `create_vs_index`
+
+This task sets up the entire semantic retrieval stack for the Care Gap Advisor.
+It uses the VS endpoint resolved by `setup_resources.py` in Step 3 — either an existing
+endpoint or a newly created one, depending on whether `vs_endpoint_name` was found.
+
+#### Step-by-step
+
+**1. Enable Change Data Feed on `care_gap_rules`**
+
+```sql
+ALTER TABLE care_gap_rules
+SET TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
+```
+
+Required by Delta Sync — CDF lets the VS pipeline propagate inserts, updates, and deletes
+to the index automatically on each triggered sync.
+
+**2. Populate `embedding_text` column**
+
+Adds and populates an `embedding_text` column with clinically rich descriptions:
+
+| Rule | Raw `check_description` | Generated `embedding_text` |
+|------|-------------------------|---------------------------|
+| CGR-001 | "HbA1c measured within the last 12 months" | "Annual HbA1c for Type 2 Diabetes Mellitus. HbA1c measured within the last 12 months. Guideline: ADA Standards of Care 2024. Priority: HIGH." |
+| CGR-006 | "Check BP is below 130/80 mmHg" | "BP at Target (<130/80) for Hypertension. Check BP is below 130/80 mmHg. Guideline: ACC/AHA 2023. Priority: HIGH." |
+
+Condition codes are expanded to full medical names (T2DM → Type 2 Diabetes Mellitus,
+HTN → Hypertension, etc.) to improve semantic matching across clinical terminology variants.
+
+**3. Create Delta Sync index**
+
+| Property | Value |
+|----------|-------|
+| Index name | `<catalog>.<schema>.care_gap_rules_vs_index` |
+| VS endpoint | value of `vs_endpoint_name` (resolved/created by `setup_resources.py`) |
+| Primary key | `rule_id` |
+| Embedding column | `embedding_text` |
+| Embedding model | `databricks-gte-large-en` |
+| Pipeline type | `TRIGGERED` — sync runs on demand, not continuously |
+
+**4. Wait for initial sync**
+
+Embeds all 20 rules (~30–60 seconds). Task waits for the index to reach `READY` state.
+
+**5. Grant app SP `CAN_QUERY` on VS endpoint**
+
+The app must be deployed (Stage 1, Step 4) before this grant can run, which is why
+VS permissions are handled here rather than in `deploy.sh`.
+
+**6. Write `care_gap_vs_index → COMPLETED` to `bootstrap_status`**
+
+The Setup page reads this on next refresh to show the step as complete.
+
+### VS index state at end of Job 1
+
+| Component | State |
+|-----------|-------|
+| `care_gap_rules.embedding_text` | Populated for all 20 rules |
+| `care_gap_rules` CDF | Enabled |
+| `care_gap_rules_vs_index` | READY — 20 rules embedded, queries served |
+| `bootstrap_status.care_gap_vs_index` | COMPLETED |
+| **Setup page step 4** | **Green — "Care Gap VS Index Ready"** |
+| App | Care Gap Advisor using VS retrieval automatically |
 
 ---
 
 ## Stage 5 — Job 2: AI Setup
 
-**Trigger:** Click **Run AI Setup (Job 2)** in the Home tab after Job 1 completes.
+**Trigger:** Click **Run AI Setup (Job 2)** on the Setup page after Job 1 completes.
 
-> Job 2 **must run after Job 1** — the `icd10_reference_pdfs` UC Volume must exist and
-> contain PDFs before the knowledge source can be attached.
-
-Job 2 runs two parallel tasks on serverless compute.
+> Job 2 does **not** touch the VS index. Care gap VS retrieval is fully operational after
+> Job 1. Job 2 is only required for ICD-10 PDF analysis.
 
 ### Tasks
 
-#### Task 1: `configure_knowledge_source`
+#### `configure_knowledge_source`
 
 Notebook: `setup/04_configure_knowledge_source.py`
 
-The Knowledge Assistant already exists (created by `setup_resources.py` during deploy).
-This task attaches the UC Volume to it as a knowledge source.
-
 | Step | What happens |
 |------|-------------|
-| Locate KA | Calls `GET /api/2.1/knowledge-assistants`, finds the KA whose `endpoint_name` matches `KA_ENDPOINT_NAME` |
-| Check sources | Calls `GET /api/2.1/<ka-name>/knowledge-sources` to see if the volume is already attached |
-| Attach volume | If not attached: calls `POST /api/2.1/<ka-name>/knowledge-sources` with the UC Volume path |
-| Already attached | If already attached: logs current state and ingestion details, skips re-attachment |
-| Update status | Writes `ka_configured_with_icd10_files → COMPLETED` to `bootstrap_status` |
+| Locate KA | Finds KA by `KA_ENDPOINT_NAME` |
+| Attach volume | `POST /api/2.1/<ka-name>/knowledge-sources` with `icd10_reference_pdfs` volume |
+| **Reset VS sync cache** | Deletes `ka_source_sync` row from `bootstrap_status` so app re-polls on next refresh |
+| Write status | `ka_source_configured → COMPLETED` |
 
-Once the volume is attached, the KA begins indexing PDFs asynchronously. Indexing typically
-takes 20–60 minutes. The Home tab step 6 status is driven by `bootstrap_status` — it shows
-**Completed** as soon as this task finishes (meaning the source is attached and sync
-triggered), not when indexing finishes.
-
-#### Task 2: `configure_ai_gateway`
-
-Notebook: `setup/05_configure_ai_gateway.py`
-
-Creates the AI Gateway serving endpoint for the Care Gap Advisor.
-
-| Condition | Endpoint used |
-|-----------|--------------|
-| Secret scope `care-gap-demo` with key `anthropic-api-key` present | External Anthropic Claude via AI Gateway (`care-gap-advisor`) |
-| Secret scope missing or key absent | `databricks-claude-sonnet-4-6` Foundation Model API (no external key needed) |
-
-The recommended path is FMAPI — no secret management required.
+> Re-running Job 2 resets the KA sync cache (`ka_source_sync`) so the app re-checks
+> PDF indexing status. The VS index for care gap rules is unaffected.
 
 ### After Job 2 completes
 
-- Home tab steps 4–6 show green **Completed** badges.
-- **ICD-10 Analyzer** tab becomes fully operational.
-- PDF indexing continues asynchronously — full citations appear as indexing progresses.
+Setup page steps 4–6 show **Completed**. PDF indexing runs asynchronously (20–60 min).
+Step 6 (`ka_source_sync`) updates on each Setup page refresh until UPDATED.
 
 ---
 
-## Stage 6 — Using the ICD-10 Analyzer Tab
+## Stage 6 — ICD-10 Analyzer
 
-**Prerequisite:** Steps 1–6 complete (the KA volume source must be configured).
+**Prerequisites:** Job 1 (patients loaded) + Job 2 (KA volume configured).
 
 ### Workflow
 
-1. Select a patient from the **Patient** dropdown — 25 synthetic records available.
-2. The patient's SOAP note loads automatically.
-3. Click **Analyze ICD-10 Codes**.
-4. The app calls the KA serving endpoint (`KA_ENDPOINT_NAME`) with the SOAP note as the query.
-5. The KA performs RAG over the indexed ICD-10 reference PDFs and returns code suggestions
-   ranked by relevance, each with a citation from the source PDF.
-6. Results are stored to `icd10_analysis_results` for audit and review.
+1. Select patient → SOAP note loads.
+2. Click **Analyze ICD-10 Codes**.
+3. App calls `FMAPI_ENDPOINT` (Claude Sonnet) with the clinical note.
+4. Model returns ICD-10 code suggestions with confidence levels.
+5. Save codes to `icd10_analysis_results`.
 
 ---
 
-## Stage 7 — Using the Care Gap Advisor Tab
+## Stage 7 — Care Gap Advisor
 
-**Prerequisite:** Steps 1–2 complete (patient records and care gap rules tables must exist).
+**Prerequisite:** Job 1 only. Does not require ICD-10 Analyzer or Job 2.
 
 ### Workflow
 
-1. Select a patient from the **Patient** dropdown.
+1. Select patient → dropdown populated from `patient_records`.
 2. Click **Identify Care Gaps**.
-3. The app loads the patient's SOAP note and all active care gap rules from `care_gap_rules`.
-4. The note and rules are sent to the Foundation Model API.
-5. The LLM returns applicable care gaps with priority, finding, recommended action, and
-   guideline reference (e.g., ADA 2024, ACC/AHA 2023).
-6. Findings are stored to `care_gap_findings`.
+3. App runs the VS retrieval + AI analysis pipeline:
 
-### Care gap rules
+```
+Clinical note (first 3,000 chars)
+    │
+    ▼
+POST /api/2.0/vector-search/indexes/{VS_INDEX_NAME}/query
+  query_text: clinical note
+  num_results: 15
+  embedding model: databricks-gte-large-en (server-side)
+    │
+    ▼
+Top-15 semantically relevant rules retrieved (~200ms)
+    │
+    ▼
+Claude Sonnet FMAPI (max_tokens=2000)
+  System: clinical care gap analyzer instructions
+  User: patient note + 15 retrieved rules
+    │
+    ▼
+Applicable gaps: rule_id, gap_name, priority, finding, recommended_action, guideline
+    │
+    ▼
+Saved to care_gap_findings on user click
+```
 
-Rules live in the `care_gap_rules` Delta table and are evaluated dynamically at query time.
-Add, edit, or deactivate rules with SQL — no code changes or redeployment needed:
+### Why VS retrieval works without ICD-10 codes
+
+The query uses raw clinical note text, not ICD-10 codes. A note containing
+`"metformin 1000mg BID, HbA1c 9.2%, no recent ophthalmology visit"` semantically
+matches T2DM care gap rules (HbA1c monitoring, diabetic eye exam) through vector
+similarity — even if no E11.x codes appear in the note.
+
+This means patients with no saved ICD-10 codes get exactly the same retrieval quality
+as patients who have had the ICD-10 Analyzer run.
+
+### Adding or updating care gap rules
+
+Rules live in the `care_gap_rules` Delta table. No code changes or app redeployment needed:
 
 ```sql
+-- Add a new rule
 INSERT INTO my_catalog.icd10_care_gap.care_gap_rules
 VALUES ('CGR-021', 'T2DM', 'Statin Therapy', 'ADA 2024',
-        'Statin prescribed for T2DM patients aged 40–75', 'HIGH');
+        'Statin prescribed for T2DM patients aged 40–75', 'HIGH', NULL);
+
+-- Edit an existing rule
+UPDATE my_catalog.icd10_care_gap.care_gap_rules
+SET check_description = 'Updated check criteria'
+WHERE rule_id = 'CGR-001';
 ```
+
+**After any rule change, regenerate `embedding_text` and sync the VS index:**
+
+```bash
+# Trigger a sync via the VS API (fastest — ~1 min for < 100 rules)
+databricks api post /api/2.0/vector-search/indexes/my_catalog.icd10_care_gap.care_gap_rules_vs_index/sync --profile DEFAULT
+```
+
+Or re-run Job 1, which detects the existing index and triggers a sync automatically.
+
+---
+
+## VS Index Lifecycle Reference
+
+| Event | Index state | Setup page | Action required |
+|-------|-------------|-----------|-----------------|
+| Before Job 1 | Does not exist | Step 4: Not Started | Run Job 1 |
+| Job 1 `create_vs_index` running | Being created + syncing | Step 4: In Progress | Wait |
+| Job 1 complete | READY — all rules embedded | Step 4: Completed ✓ | None |
+| Rules added/edited in SQL | Stale — new rules not embedded | Step 4: still green | Trigger sync |
+| Job 1 re-run | Detects existing index → sync only | Step 4: re-runs, stays green | None |
+| Job 2 run or re-run | Unchanged | Unaffected | None |
+| VS endpoint OFFLINE | Queries fail silently | Job 1 prereq: red | Wait or check endpoint |
+| VS endpoint recovers | Queries resume automatically | Job 1 prereq: green | None |
+
+### Scaling guide
+
+| Rule count | VS retrieves | Latency overhead | Benefit |
+|-----------|-------------|-----------------|---------|
+| 20 (current) | top-15 | ~250ms | ~25% fewer rules per query |
+| 100 | top-15 | ~250ms | ~85% fewer rules — significant |
+| 1,000 | top-15 | ~250ms | ~98.5% fewer rules — dramatic |
+| 10,000+ | top-15 | ~300ms | O(1) — fully scalable |
+
+Tune `_VS_NUM_RESULTS` in `tab_caregap.py` to adjust retrieval width. Higher values
+improve recall; lower values reduce Sonnet prompt size.
 
 ---
 
@@ -418,13 +442,17 @@ VALUES ('CGR-021', 'T2DM', 'Statin Therapy', 'ADA 2024',
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| "You do not have permission to use the SQL Warehouse" | App SP missing `CAN_USE` | Re-run `deploy.sh` — Step 5 grants the permission |
-| Home tab shows all steps as "Not Started" | Job 1 hasn't run | Click **Run Data Setup (Job 1)** |
-| ICD-10 Analyzer tab is disabled | Job 2 hasn't run | Click **Run AI Setup (Job 2)** |
-| ICD-10 Analyzer returns no results | PDF indexing still in progress | Wait 20–60 min; citations appear as indexing progresses |
-| Job 2 `configure_knowledge_source` fails with "No KA found" | `KA_ENDPOINT_NAME` env var doesn't match any live KA | Re-run `deploy.sh` — `setup_resources.py` will re-resolve and regenerate `app.yaml` |
-| Job 2 `configure_ai_gateway` fails | Secret scope `care-gap-demo` missing | Normal in `databricks` mode — this task falls back to FMAPI automatically |
-| Step 6 shows "Not yet run" after Job 2 | `04_configure_knowledge_source` notebook failed | Check the Job 2 run log; re-run Job 2 |
+| Setup page: all steps "Not Started" | Job 1 hasn't run | Click Run Data Setup (Job 1) |
+| Care Gap Advisor falls back to all rules | VS index not ready or `VS_INDEX_NAME` not set | Ensure Job 1 completed; check Settings tab for `VS_INDEX_NAME` |
+| New rules not appearing in care gap results | VS index not synced after rule insert | Trigger sync via API or re-run Job 1 |
+| Job 1 `create_vs_index` fails: "not a valid VS source" | CDF not enabled | Re-run Job 1 — task enables CDF before creating index |
+| Job 1 prereq shows VS Endpoint red | VS endpoint OFFLINE or `VS_ENDPOINT_NAME` not set | Verify endpoint is ONLINE; re-run `deploy.sh` if `VS_ENDPOINT_NAME` is missing from `app.yaml` |
+| Job 1 `create_vs_index` fails: endpoint not found | `vs_endpoint_name` in `databricks.yml` is wrong or endpoint offline | Verify endpoint: `databricks api get /api/2.0/vector-search/endpoints` |
+| VS query returns unexpected rules | `embedding_text` column is stale | Re-run Job 1 to regenerate embeddings |
+| ICD-10 Analyzer disabled | No patients loaded | Run Job 1 |
+| ICD-10 Analyzer returns no results | PDF indexing in progress | Wait 20–60 min; refresh Setup page |
+| Job 2 fails: "No KA found" | `KA_ENDPOINT_NAME` env var mismatch | Re-run `deploy.sh` to re-resolve and regenerate `app.yaml` |
+| "SQL Warehouse permission denied" | App SP missing `CAN_USE` | Re-run `deploy.sh` — Step 5 grants the permission |
 
 ---
 
@@ -432,6 +460,7 @@ VALUES ('CGR-021', 'T2DM', 'Statin Therapy', 'ADA 2024',
 
 All setup notebooks are idempotent — safe to re-run at any time:
 
-- **Job 1** can be re-run to add new patient records or update PDF files in the UC Volume.
-- **Job 2** can be re-run to re-attach the knowledge source or reconfigure the AI Gateway.
-- Re-running a completed job does not duplicate data or resources.
+- **Job 1 re-run:** syncs the VS index with any rule changes; does not duplicate data.
+- **Job 2 re-run:** resets KA PDF sync cache; re-attaches volume if detached. Does not
+  affect VS index.
+- Re-running either job does not duplicate tables, indexes, or resources.

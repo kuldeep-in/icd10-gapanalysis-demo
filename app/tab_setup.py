@@ -2,26 +2,43 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 import dash
-from dash import html, callback, Input, Output, State
+from dash import dcc, html, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 
 from config import (
     w, CATALOG, SCHEMA, WAREHOUSE_ID,
-    KA_ENDPOINT_NAME, KA_NAME,
+    KA_ENDPOINT_NAME, KA_NAME, FMAPI_ENDPOINT,
+    VS_ENDPOINT_NAME,
     DATA_SETUP_JOB_NAME, AI_SETUP_JOB_NAME,
     BOOTSTRAP_STEPS, GROUP_META, STATUS_META, DONE_STATUSES,
-    JOB1_STEPS, JOB2_STEPS, logger,
+    JOB1_STEPS, JOB2_STEPS, logger, _app_sp_name,
 )
 from db import load_patients, execute_sql, _sql_esc
 
-_BOOTSTRAP_STABLE_STEPS = {
-    "create_catalog", "setup_care_gap_rules", "ingest_patient_data",
-    "load_icd10_pdfs", "ka_source_configured",
-}
+# ---------------------------------------------------------------------------
+# Job ID cache — populated lazily on first trigger button click, never on load
+# ---------------------------------------------------------------------------
+_job_ids: dict = {}
+
+
+def _get_job_ids() -> tuple[int | None, int | None]:
+    if not _job_ids:
+        try:
+            for job in w.jobs.list():
+                name = job.settings.name or ""
+                if DATA_SETUP_JOB_NAME in name:
+                    _job_ids["job1_id"] = job.job_id
+                elif AI_SETUP_JOB_NAME in name:
+                    _job_ids["job2_id"] = job.job_id
+                if "job1_id" in _job_ids and "job2_id" in _job_ids:
+                    break
+        except Exception as e:
+            logger.warning(f"Job lookup failed: {e}")
+    return _job_ids.get("job1_id"), _job_ids.get("job2_id")
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap table helpers
+# Bootstrap status — single SQL query, written by setup notebooks
 # ---------------------------------------------------------------------------
 def _load_bootstrap_statuses(catalog: str, schema: str) -> dict:
     try:
@@ -36,79 +53,31 @@ def _load_bootstrap_statuses(catalog: str, schema: str) -> dict:
         return {}
 
 
-def _write_bootstrap_status(catalog: str, schema: str, step_id: str, detail: str) -> None:
-    if step_id not in _BOOTSTRAP_STABLE_STEPS:
-        return
-    try:
-        execute_sql(f"""
-            MERGE INTO `{catalog}`.`{schema}`.bootstrap_status AS t
-            USING (SELECT '{_sql_esc(step_id)}' AS step,
-                          'COMPLETED'            AS status,
-                          '{_sql_esc(detail)}'   AS details) AS s
-            ON t.step = s.step
-            WHEN MATCHED THEN UPDATE SET
-                status     = s.status,
-                updated_at = CURRENT_TIMESTAMP(),
-                details    = s.details
-            WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
-                VALUES (s.step, s.status, CURRENT_TIMESTAMP(), s.details)
-        """)
-    except Exception as e:
-        logger.warning(f"Could not write bootstrap_status for {step_id}: {e}")
-
-
 # ---------------------------------------------------------------------------
-# Bootstrap step checks
+# KA checks — called only on page load and Refresh button click
 # ---------------------------------------------------------------------------
-def _chk_catalog(catalog: str) -> dict:
-    try:
-        rows = execute_sql_inner(
-            f"SELECT catalog_name FROM system.information_schema.catalogs "
-            f"WHERE catalog_name = '{catalog}'"
-        )
-        ok = len(rows) > 0
-        return {"ok": ok, "label": f"`{catalog}` found" if ok else f"`{catalog}` not found"}
-    except Exception as e:
-        return {"ok": False, "label": str(e)[:100]}
-
-
-def _chk_schema(catalog: str, schema: str) -> dict:
-    try:
-        rows = execute_sql_inner(
-            f"SELECT schema_name FROM `{catalog}`.information_schema.schemata "
-            f"WHERE schema_name = '{schema}'"
-        )
-        ok = len(rows) > 0
-        return {"ok": ok, "label": f"`{schema}` found" if ok else f"`{schema}` not found"}
-    except Exception as e:
-        return {"ok": False, "label": str(e)[:100]}
-
-
-def _chk_table_rows(catalog: str, schema: str, table: str) -> dict:
-    try:
-        from db import execute_sql
-        r   = execute_sql(f"SELECT COUNT(*) as cnt FROM `{catalog}`.`{schema}`.`{table}`")
-        cnt = int(r[0]["cnt"]) if r else 0
-        return {"ok": cnt > 0, "cnt": cnt, "label": f"{cnt} row{'s' if cnt != 1 else ''}"}
-    except Exception as e:
-        return {"ok": False, "cnt": 0, "label": str(e)[:120]}
-
-
-def _chk_volume_files(catalog: str, schema: str, volume: str) -> dict:
-    try:
-        entries = list(w.files.list_directory_contents(f"/Volumes/{catalog}/{schema}/{volume}"))
-        cnt = len(entries)
-        return {"ok": cnt > 0, "cnt": cnt, "label": f"{cnt} file{'s' if cnt != 1 else ''}"}
-    except Exception as e:
-        return {"ok": False, "cnt": 0, "label": str(e)[:120]}
-
-
 def _chk_ka_endpoint(endpoint_name: str) -> dict:
     if not endpoint_name:
         return {"ok": False, "label": "KA_ENDPOINT_NAME not set — run setup_resources.py before deploy"}
     try:
         w.serving_endpoints.get(name=endpoint_name)
         return {"ok": True, "label": f"Endpoint `{endpoint_name}` ready"}
+    except Exception as e:
+        err = str(e)
+        if any(x in err for x in ("NOT_FOUND", "404", "does not exist", "not found")):
+            return {"ok": False, "label": f"Endpoint `{endpoint_name}` not found"}
+        return {"ok": False, "label": err[:100]}
+
+
+def _chk_vs_endpoint(endpoint_name: str) -> dict:
+    if not endpoint_name:
+        return {"ok": False, "label": "VS_ENDPOINT_NAME not set — run setup_resources.py before deploy"}
+    try:
+        data  = w.api_client.do("GET", f"/api/2.0/vector-search/endpoints/{endpoint_name}")
+        state = data.get("endpoint_status", {}).get("state", "")
+        if state == "ONLINE":
+            return {"ok": True, "label": f"Endpoint `{endpoint_name}` ONLINE"}
+        return {"ok": False, "label": f"Endpoint `{endpoint_name}` state: {state or 'unknown'}"}
     except Exception as e:
         err = str(e)
         if any(x in err for x in ("NOT_FOUND", "404", "does not exist", "not found")):
@@ -141,194 +110,57 @@ def _chk_ka_sources(ka_name: str, volume_path: str) -> dict:
         return {"source_found": False, "state": "", "ingestion": {}, "error": str(e)[:120]}
 
 
-def execute_sql_inner(statement: str) -> list[dict]:
-    from db import execute_sql
-    return execute_sql(statement)
+# ---------------------------------------------------------------------------
+# KA sync cache writer — called once when indexing first reaches UPDATED state
+# ---------------------------------------------------------------------------
+def _cache_ka_sync_status(catalog: str, schema: str, detail: str) -> None:
+    try:
+        execute_sql(f"""
+            MERGE INTO `{catalog}`.`{schema}`.bootstrap_status AS t
+            USING (SELECT 'ka_source_sync' AS step) AS s ON t.step = s.step
+            WHEN MATCHED THEN UPDATE SET
+                status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP(),
+                details = '{_sql_esc(detail)}'
+            WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
+                VALUES ('ka_source_sync', 'COMPLETED', CURRENT_TIMESTAMP(), '{_sql_esc(detail)}')
+        """)
+        logger.info("Cached ka_source_sync = COMPLETED in bootstrap_status")
+    except Exception as e:
+        logger.warning(f"Could not cache ka_source_sync status: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Job helpers
+# Step status computation
+# Happy path (setup complete): 1 SQL only, zero KA API calls
+# During indexing: 1 SQL + 1 KA API; writes cache on first UPDATED result
 # ---------------------------------------------------------------------------
-def find_job_ids() -> tuple[int | None, int | None]:
-    try:
-        job1_id = job2_id = None
-        for job in w.jobs.list():
-            name = job.settings.name or ""
-            if DATA_SETUP_JOB_NAME in name:
-                job1_id = job.job_id
-            elif AI_SETUP_JOB_NAME in name:
-                job2_id = job.job_id
-            if job1_id and job2_id:
-                break
-        return job1_id, job2_id
-    except Exception as e:
-        logger.warning(f"Job lookup failed: {e}")
-        return None, None
+def _check_step_statuses(catalog: str, schema: str) -> list[dict]:
+    db_statuses = _load_bootstrap_statuses(catalog, schema)
 
-
-def get_active_run(job_id: int) -> dict | None:
-    try:
-        runs = list(w.jobs.list_runs(job_id=job_id, active_only=True))
-        if runs:
-            r = runs[0]
-            return {"run_id": r.run_id, "url": r.run_page_url or ""}
-    except Exception as e:
-        logger.warning(f"Active run check failed: {e}")
-    return None
-
-
-def _job1_action(steps: list[dict], job1_id: int | None, job1_active: dict | None) -> dict:
-    by_id     = {s["step_id"]: s["status"] for s in steps}
-    job1_done = all(by_id.get(s) in DONE_STATUSES for s in JOB1_STEPS)
-    job1_fail = any(by_id.get(s) == "FAILED"      for s in JOB1_STEPS)
-    if job1_done:
-        return {"action": "done", "job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME,
-                "label": "Data Setup Complete", "description": "All data setup steps are complete.", "active_run": None}
-    if job1_active:
-        return {"action": "running", "job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME,
-                "label": "Data Setup Running…", "description": "Job 1 is in progress.", "active_run": job1_active}
-    return {
-        "action":      "run_job1",
-        "job_id":      job1_id,
-        "job_name":    DATA_SETUP_JOB_NAME,
-        "label":       "Re-run Data Setup" if job1_fail else "Run Data Setup",
-        "description": "Creates catalog, ingests patient records, uploads ICD-10 PDFs",
-        "active_run":  None,
-    }
-
-
-def _job2_action(steps: list[dict], job2_id: int | None, job2_active: dict | None) -> dict:
-    by_id        = {s["step_id"]: s["status"] for s in steps}
-    job2_done    = all(by_id.get(s) in DONE_STATUSES for s in JOB2_STEPS)
-    job2_fail    = any(by_id.get(s) == "FAILED"      for s in JOB2_STEPS)
-    job2_syncing = any(by_id.get(s) == "IN_PROGRESS"  for s in JOB2_STEPS)
-    if job2_done:
-        return {"action": "done", "job_id": job2_id, "job_name": AI_SETUP_JOB_NAME,
-                "label": "KA Setup Complete", "description": "All Knowledge Assistant setup steps are complete.", "active_run": None}
-    if job2_active:
-        return {"action": "running", "job_id": job2_id, "job_name": AI_SETUP_JOB_NAME,
-                "label": "KA Setup Running…", "description": "Job 2 is in progress.", "active_run": job2_active}
-    if job2_syncing:
-        return {"action": "running", "job_id": job2_id, "job_name": AI_SETUP_JOB_NAME,
-                "label": "Indexing in Progress…",
-                "description": "Knowledge Assistant is indexing PDFs. Refresh to check progress.",
-                "active_run": None}
-    return {
-        "action":      "run_job2",
-        "job_id":      job2_id,
-        "job_name":    AI_SETUP_JOB_NAME,
-        "label":       "Re-run KA Setup" if job2_fail else "Run KA Setup",
-        "description": "Uploads ICD-10 PDFs and configures the Knowledge Assistant",
-        "active_run":  None,
-    }
-
-
-def _check_step_statuses(
-    catalog: str, schema: str, cache: dict | None = None
-) -> tuple[list[dict], dict]:
-    cache     = cache or {}
-    new_cache = {k: v for k, v in cache.items() if v.get("status") in DONE_STATUSES}
-
-    stable_missing = _BOOTSTRAP_STABLE_STEPS - set(new_cache.keys())
-    if stable_missing:
-        for sid, row in _load_bootstrap_statuses(catalog, schema).items():
-            if sid in stable_missing:
-                ts = str(row.get("updated_at", ""))[:19].replace("T", " ")
-                new_cache[sid] = {
-                    "status":     "COMPLETED",
-                    "detail":     row.get("details", ""),
-                    "checks":     [],
-                    "updated_at": ts,
-                }
-
-    needs_create = "create_catalog"        not in new_cache
-    needs_rules  = "setup_care_gap_rules"  not in new_cache
-    needs_pts    = "ingest_patient_data"   not in new_cache
-    needs_vol    = "load_icd10_pdfs"       not in new_cache or "ka_source_configured" not in new_cache
-    needs_ka     = True
-
-    volume_path = f"/Volumes/{catalog}/{schema}/icd10_reference_pdfs"
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        f_cat   = ex.submit(_chk_catalog, catalog)                               if needs_create else None
-        f_sch   = ex.submit(_chk_schema,  catalog, schema)                       if needs_create else None
-        f_rules = ex.submit(_chk_table_rows, catalog, schema, "care_gap_rules")  if needs_rules  else None
-        f_pts   = ex.submit(_chk_table_rows, catalog, schema, "patient_records") if needs_pts    else None
-        f_vol   = ex.submit(_chk_volume_files, catalog, schema, "icd10_reference_pdfs") if needs_vol else None
-        f_ka    = ex.submit(_chk_ka_sources, KA_NAME, volume_path)               if needs_ka     else None
-
-        cat_chk   = f_cat.result()   if f_cat   else {"ok": True, "label": f"`{catalog}` found"}
-        sch_chk   = f_sch.result()   if f_sch   else {"ok": True, "label": f"`{schema}` found"}
-        rules_chk = f_rules.result() if f_rules else None
-        pts_chk   = f_pts.result()   if f_pts   else None
-        vol_chk   = f_vol.result()   if f_vol   else None
-        ka_src    = f_ka.result()    if f_ka    else None
-
-    schema_ok = sch_chk["ok"]
+    # Skip KA API entirely if sync result is already cached in bootstrap_status
+    ka_src = None
+    if "ka_source_sync" not in db_statuses:
+        ka_src = _chk_ka_sources(KA_NAME, f"/Volumes/{catalog}/{schema}/icd10_reference_pdfs")
 
     result = []
     for step in BOOTSTRAP_STEPS:
-        sid    = step["step_id"]
-        cached = new_cache.get(sid)
-        if cached and cached.get("status") in DONE_STATUSES:
-            result.append({**step, **cached})
+        sid = step["step_id"]
+
+        # Steps 1–5: trust bootstrap_status written by the setup notebooks
+        if sid in db_statuses:
+            row = db_statuses[sid]
+            ts  = str(row.get("updated_at", ""))[:19].replace("T", " ")
+            result.append({**step, "status": "COMPLETED",
+                           "detail": row.get("details", ""), "checks": [], "updated_at": ts})
             continue
 
-        status = "NOT_STARTED"
-        detail = "Not yet started"
-        checks: list = []
-
-        if sid == "create_catalog":
-            checks = [
-                ("fa-layer-group", "Catalog", cat_chk),
-                ("fa-table",       "Schema",  sch_chk),
-            ]
-            if cat_chk["ok"] and sch_chk["ok"]:
-                status = "COMPLETED"
-                detail = f"Catalog `{catalog}` and schema `{schema}` exist"
-            else:
-                missing = "catalog" if not cat_chk["ok"] else "schema"
-                detail  = f"`{missing}` not found — run Data Setup"
-
-        elif sid == "setup_care_gap_rules":
-            chk    = rules_chk if schema_ok else {"ok": False, "label": "skipped — schema not found"}
-            checks = [("fa-list-check", "Care gap rules", chk)]
-            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
-            detail = chk["label"]
-
-        elif sid == "ingest_patient_data":
-            chk    = pts_chk if schema_ok else {"ok": False, "label": "skipped — schema not found"}
-            checks = [("fa-users", "Patient records", chk)]
-            status = "COMPLETED" if chk["ok"] else "NOT_STARTED"
-            detail = chk["label"]
-
-        elif sid == "load_icd10_pdfs":
-            checks = [("fa-file-pdf", "ICD-10 PDFs in volume", vol_chk)]
-            status = "COMPLETED" if vol_chk["ok"] else "NOT_STARTED"
-            detail = vol_chk["label"]
-
-        elif sid == "ka_source_configured":
-            src_ok = ka_src.get("source_found", False) if ka_src else False
-            if ka_src and ka_src.get("error"):
-                src_label = ka_src["error"]
-            elif src_ok:
-                src_label = f"Volume attached (state: {ka_src.get('state') or 'unknown'})"
-            else:
-                src_label = "Volume not attached to KA — run Job 2"
-            checks = [
-                ("fa-file-pdf", "PDFs in volume",        vol_chk),
-                ("fa-plug",     "Volume attached to KA", {"ok": src_ok, "label": src_label}),
-            ]
-            status = "COMPLETED" if src_ok else "NOT_STARTED"
-            detail = src_label
-
-        elif sid == "ka_source_sync":
+        # Step 6: KA sync state is dynamic — derived from the KA API response
+        if sid == "ka_source_sync":
             state     = (ka_src or {}).get("state", "")
             ingestion = (ka_src or {}).get("ingestion", {})
             if not ka_src or not ka_src.get("source_found"):
-                status   = "NOT_STARTED"
-                detail   = "Volume not attached — complete step 5 first"
-                sync_chk = {"ok": False, "label": detail}
+                status = "NOT_STARTED"
+                detail = "Volume not attached — complete step 5 first"
             elif state == "UPDATED":
                 total   = ingestion.get("total_file_count",   "?")
                 success = ingestion.get("success_file_count", "?")
@@ -338,33 +170,28 @@ def _check_step_statuses(
                 detail  = f"{success}/{total} files indexed · {vectors} vectors"
                 if str(failed) not in ("0", ""):
                     detail += f" · {failed} failed"
-                sync_chk = {"ok": True, "label": detail}
             elif state in ("UPDATING", "PENDING", "RUNNING"):
-                success  = ingestion.get("success_file_count", "0")
-                total    = ingestion.get("total_file_count",   "?")
-                status   = "IN_PROGRESS"
-                detail   = f"Indexing in progress — {success}/{total} files done"
-                sync_chk = {"ok": False, "label": detail}
+                success = ingestion.get("success_file_count", "0")
+                total   = ingestion.get("total_file_count",   "?")
+                status  = "IN_PROGRESS"
+                detail  = f"Indexing in progress — {success}/{total} files done"
             elif state == "FAILED":
-                status   = "FAILED"
-                detail   = "Indexing failed — check KA sources in Databricks UI"
-                sync_chk = {"ok": False, "label": detail}
+                status = "FAILED"
+                detail = "Indexing failed — check KA sources in Databricks UI"
             else:
-                status   = "NOT_STARTED"
-                detail   = f"Sync state: {state or 'unknown'}"
-                sync_chk = {"ok": False, "label": detail}
-            checks = [("fa-brain", "Indexing state", sync_chk)]
+                status = "NOT_STARTED"
+                detail = f"Sync state: {state or 'unknown'}"
+            ts = datetime.now().strftime("%H:%M:%S") if status in DONE_STATUSES else ""
+            if status == "COMPLETED":
+                _cache_ka_sync_status(catalog, schema, detail)
+            result.append({**step, "status": status, "detail": detail,
+                           "checks": [], "updated_at": ts})
+            continue
 
-        ts          = datetime.now().strftime("%H:%M:%S") if status in DONE_STATUSES else ""
-        step_result = {**step, "status": status, "detail": detail, "checks": checks, "updated_at": ts}
-        result.append(step_result)
+        result.append({**step, "status": "NOT_STARTED", "detail": "Not yet started",
+                       "checks": [], "updated_at": ""})
 
-        if status in DONE_STATUSES:
-            new_cache[sid] = {"status": status, "detail": detail, "checks": checks, "updated_at": ts}
-            if sid in _BOOTSTRAP_STABLE_STEPS:
-                _write_bootstrap_status(catalog, schema, sid, detail)
-
-    return result, new_cache
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +333,70 @@ def _group_badge(group_steps: list[dict]) -> dbc.Badge:
                      style={"fontSize": "11px"})
 
 
+def _settings_column() -> dbc.Col:
+    def _cfg_row(label: str, value: str, icon: str, warn: bool = False) -> dbc.Row:
+        return dbc.Row([
+            dbc.Col(
+                html.Span([
+                    html.I(className=f"fa-solid {icon} me-2 text-muted", style={"width": "14px"}),
+                    html.Span(label, className="small fw-semibold text-muted"),
+                ]),
+                width=5,
+            ),
+            dbc.Col(
+                dbc.Badge(
+                    value or "—",
+                    color="danger" if warn else "light",
+                    text_color="white" if warn else "dark",
+                    className="font-monospace text-wrap",
+                    style={"fontSize": "11px", "fontWeight": "400"},
+                ),
+                width=7,
+            ),
+        ], className="mb-2 align-items-center")
+
+    def _section(label: str) -> html.Small:
+        return html.Small(
+            label, className="text-muted text-uppercase fw-bold d-block mb-2",
+            style={"fontSize": "10px", "letterSpacing": "0.5px"},
+        )
+
+    wh_missing = not WAREHOUSE_ID or WAREHOUSE_ID == "<your-warehouse-id>"
+
+    card = dbc.Card([
+        dbc.CardHeader([
+            html.I(className="fa-solid fa-gear me-2"),
+            html.Strong("Configuration", style={"fontSize": "14px"}),
+        ], style={"background": "#f8f9fa", "borderBottom": "2px solid #6c757d"}),
+        dbc.CardBody([
+            _section("Unity Catalog"),
+            _cfg_row("Catalog", CATALOG or "—", "fa-layer-group"),
+            _cfg_row("Schema",  SCHEMA  or "—", "fa-table"),
+            html.Hr(className="my-2"),
+            _section("Infrastructure"),
+            _cfg_row("SQL Warehouse", WAREHOUSE_ID or "Not set", "fa-warehouse", warn=wh_missing),
+            html.Hr(className="my-2"),
+            _section("AI Configuration"),
+            _cfg_row("Care Gap Model", FMAPI_ENDPOINT      or "Not set", "fa-microchip"),
+            _cfg_row("KA Endpoint",    KA_ENDPOINT_NAME    or "Not set", "fa-robot",    warn=not KA_ENDPOINT_NAME),
+            _cfg_row("Data Setup Job", DATA_SETUP_JOB_NAME or "—",       "fa-play"),
+            _cfg_row("AI Setup Job",   AI_SETUP_JOB_NAME   or "—",       "fa-play"),
+            html.Hr(className="my-2"),
+            _section("App Identity"),
+            _cfg_row("Service Principal", _app_sp_name or "Not resolved",
+                     "fa-user-gear", warn=not _app_sp_name),
+            html.Hr(className="my-2"),
+            html.Small(
+                [html.I(className="fa-solid fa-circle-info me-1"),
+                 "Values set in ", html.Code("app.yaml", style={"fontSize": "10px"}), " at deploy time."],
+                className="text-muted", style={"fontSize": "11px"},
+            ),
+        ], className="p-2"),
+    ], style={"borderTop": "3px solid #6c757d", "height": "100%"}, className="shadow-sm")
+
+    return dbc.Col(card, md=4, className="mb-3")
+
+
 def _job_column(group: int, g_steps: list[dict], action: dict,
                 prereqs: list[dict] | None = None,
                 accordion_active=None) -> dbc.Col:
@@ -516,17 +407,15 @@ def _job_column(group: int, g_steps: list[dict], action: dict,
     border_color = meta["border"]
 
     a          = action.get("action", "none")
-    job_id     = action.get("job_id")
-    no_job     = job_id is None
     prereqs_ok = all(p.get("ok", False) for p in (prereqs or []))
 
     default_active = [s["step_id"] for s in g_steps if s["status"] not in DONE_STATUSES]
-    acc_active     = accordion_active if accordion_active is not None else default_active
+    active_item    = accordion_active if accordion_active is not None else default_active
     accordion = dbc.Accordion(
         [_step_accordion_item(s) for s in g_steps],
         id=f"accordion-group{group}",
         always_open=True,
-        active_item=acc_active,
+        active_item=active_item,
         className="mb-0",
     )
 
@@ -538,39 +427,19 @@ def _job_column(group: int, g_steps: list[dict], action: dict,
         )
         run_hint = None
 
-    elif a == "running":
-        run_url  = (action.get("active_run") or {}).get("url", "")
-        run_btn  = dbc.Button(
-            [dbc.Spinner(size="sm", className="me-2"), action.get("label", "Running…")],
-            id=btn_id, color=btn_color,
-            disabled=True, size="sm", style={"minWidth": "160px"},
-        )
-        run_hint = html.A(
-            [html.I(className="fa-solid fa-arrow-up-right-from-square me-1"), "View run"],
-            href=run_url, target="_blank", className="small d-block text-center mt-1",
-        ) if run_url else None
-
     else:
-        btn_disabled = no_job or not prereqs_ok
-        icon  = "fa-rotate-right" if "Re-run" in action.get("label", "") else "fa-play"
+        icon    = "fa-rotate-right" if "Re-run" in action.get("label", "") else "fa-play"
         run_btn = dbc.Button(
             [html.I(className=f"fa-solid {icon} me-2"), action.get("label", "Run")],
             id=btn_id, color=btn_color,
-            disabled=btn_disabled, size="sm", style={"minWidth": "130px"},
+            disabled=not prereqs_ok, size="sm", style={"minWidth": "130px"},
         )
-        if no_job:
-            run_hint = html.Small(
-                [html.I(className="fa-solid fa-triangle-exclamation me-1 text-danger"),
-                 "Bundle not deployed"],
-                className="d-block text-center text-danger mt-1",
-            )
-        elif not prereqs_ok:
-            run_hint = html.Small(
+        run_hint = (
+            html.Small(
                 [html.I(className="fa-solid fa-lock me-1 text-muted"), "Prerequisites not met"],
                 className="d-block text-center text-muted mt-1",
-            )
-        else:
-            run_hint = None
+            ) if not prereqs_ok else None
+        )
 
     run_area = html.Div([run_btn, run_hint], className="d-flex flex-column align-items-center")
 
@@ -595,15 +464,15 @@ def _job_column(group: int, g_steps: list[dict], action: dict,
             html.Div(accordion),
         ], className="p-2"),
     ], style={"borderTop": f"3px solid {border_color}", "height": "100%"})
-    return dbc.Col(card, md=6, className="mb-3")
+    return dbc.Col(card, md=4, className="mb-3")
 
 
 def build_setup_tab_content(
     steps: list[dict],
     last_refreshed: str,
     all_done: bool,
-    action1: dict | None = None,
-    action2: dict | None = None,
+    act1: dict | None = None,
+    act2: dict | None = None,
     prereqs1: list[dict] | None = None,
     prereqs2: list[dict] | None = None,
     accordion1_active=None,
@@ -632,27 +501,16 @@ def build_setup_tab_content(
 
     return html.Div([
         banner,
+        dbc.Progress(
+            value=pct, color=prog_color,
+            striped=not all_done, animated=not all_done,
+            style={"height": "10px"}, className="mb-3",
+        ),
         dbc.Row([
-            dbc.Col([
-                html.Div(
-                    [html.Strong(f"{completed}"), f" of {total} steps complete"],
-                    className="small text-muted mb-1"
-                ),
-                dbc.Progress(
-                    value=pct, color=prog_color,
-                    striped=not all_done, animated=not all_done,
-                    style={"height": "10px"},
-                ),
-            ], width=8),
-            dbc.Col(
-                html.Small(f"Last updated: {last_refreshed}", className="text-muted"),
-                width=4, className="text-end",
-            ),
-        ], align="center", className="mb-3"),
-        dbc.Row([
-            _job_column(1, groups.get(1, []), action1 or {"action": "none"},
+            _settings_column(),
+            _job_column(1, groups.get(1, []), act1 or {"action": "none"},
                         prereqs=prereqs1, accordion_active=accordion1_active),
-            _job_column(2, groups.get(2, []), action2 or {"action": "none"},
+            _job_column(2, groups.get(2, []), act2 or {"action": "none"},
                         prereqs=prereqs2, accordion_active=accordion2_active),
         ], className="g-3"),
         html.Div([
@@ -669,23 +527,66 @@ def build_setup_tab_content(
     ])
 
 
+# ---------------------------------------------------------------------------
+# Shell — renders skeleton instantly (zero DB calls), interval triggers load
+# ---------------------------------------------------------------------------
 def setup_shell() -> html.Div:
-    return html.Div([
+    skeleton_steps = [
+        {**s, "status": "NOT_STARTED", "detail": "Loading…", "checks": [], "updated_at": ""}
+        for s in BOOTSTRAP_STEPS
+    ]
+    wh_ok    = bool(WAREHOUSE_ID)    and WAREHOUSE_ID    not in ("", "<your-warehouse-id>")
+    vs_ep_ok = bool(VS_ENDPOINT_NAME) and VS_ENDPOINT_NAME not in ("", "<your-vs-endpoint>")
+    ka_ok    = bool(KA_ENDPOINT_NAME) and KA_ENDPOINT_NAME not in ("", "<your-ka-endpoint>")
+    prereqs1 = [
+        {"icon": "fa-warehouse",    "label": "SQL Warehouse", "value": WAREHOUSE_ID     or "Not set", "ok": wh_ok},
+        {"icon": "fa-circle-nodes", "label": "VS Endpoint",   "value": VS_ENDPOINT_NAME or "Not set", "ok": vs_ep_ok},
+    ]
+    prereqs2 = [{"icon": "fa-robot", "label": "KA Endpoint",
+                 "value": KA_ENDPOINT_NAME or "Not set", "ok": ka_ok}]
+    act_stub = {"action": "run_job1", "job_id": 1, "label": "—", "active_run": None, "description": ""}
+    skeleton_content = build_setup_tab_content(
+        skeleton_steps, "—", False,
+        act1={**act_stub, "job_name": DATA_SETUP_JOB_NAME},
+        act2={**act_stub, "action": "run_job2", "job_name": AI_SETUP_JOB_NAME},
+        prereqs1=prereqs1,
+        prereqs2=prereqs2,
+        accordion1_active=[],
+        accordion2_active=[],
+    )
+
+    loading_toast = dbc.Toast(
+        [html.I(className="fa-solid fa-rotate fa-spin me-2"), "Fetching setup status…"],
+        id="setup-loading-toast",
+        header="Setup",
+        icon="info",
+        is_open=True,
+        dismissable=False,
+        style={
+            "position": "fixed", "top": "70px", "right": "20px",
+            "zIndex": 9999, "minWidth": "220px",
+        },
+    )
+
+    return html.Div(className="px-4 py-3", children=[
+        # Fires once per /setup visit to load real statuses into the skeleton
+        dcc.Interval(id="setup-load-interval", interval=500, max_intervals=1, n_intervals=0),
+
         dbc.Row([
             dbc.Col(html.H5("Demo Environment Status", className="mb-0 fw-bold"), width="auto"),
+            dbc.Col(
+                html.Small(id="setup-last-updated", className="text-muted"),
+                width="auto", className="ms-auto",
+            ),
             dbc.Col(
                 dbc.Button(
                     [html.I(className="fa-solid fa-rotate me-2"), "Refresh Now"],
                     id="setup-refresh-btn", color="outline-secondary", size="sm",
                 ),
-                width="auto", className="ms-auto",
+                width="auto", className="ms-2",
             ),
         ], align="center", className="mb-3"),
-        dbc.Spinner(
-            html.Div(id="setup-step-content"),
-            color="primary",
-            spinner_style={"width": "2rem", "height": "2rem"},
-        ),
+        html.Div(id="setup-step-content", children=[loading_toast, skeleton_content]),
     ])
 
 
@@ -693,27 +594,21 @@ def setup_shell() -> html.Div:
 # Callbacks
 # ---------------------------------------------------------------------------
 @callback(
-    Output("setup-step-content",       "children"),
-    Output("all-done-store",           "data"),
-    Output("ka-endpoint-store",        "data"),
-    Output("patient-store",            "data"),
-    Output("job1-action-store",        "data"),
-    Output("job2-action-store",        "data"),
-    Output("step-cache-store",         "data"),
-    Output("job-ids-store",            "data"),
-    Input("setup-refresh-btn",         "n_clicks"),
-    Input("catalog-store",             "data"),
-    Input("schema-store",              "data"),
-    State("step-cache-store",          "data"),
-    State("job-ids-store",             "data"),
-    State("accordion1-active-store",   "data"),
-    State("accordion2-active-store",   "data"),
-    prevent_initial_call=False,
+    Output("setup-step-content",              "children"),
+    Output("all-done-store",       "data",                allow_duplicate=True),
+    Output("ka-endpoint-store",   "data"),
+    Output("patient-store",       "data",                allow_duplicate=True),
+    Output("setup-last-updated",  "children"),
+    Output("setup-complete-store","data",                allow_duplicate=True),
+    Input("setup-refresh-btn",    "n_clicks"),
+    Input("setup-load-interval", "n_intervals"),
+    State("catalog-store",       "data"),
+    State("schema-store",        "data"),
+    prevent_initial_call=True,
 )
-def refresh_setup(n_clicks, catalog, schema, step_cache, job_ids_data, acc1_active, acc2_active):
-    cat        = catalog or CATALOG
-    sch        = schema  or SCHEMA
-    step_cache = step_cache or {}
+def refresh_setup(n_clicks, n_intervals, catalog, schema):
+    cat = catalog or CATALOG
+    sch = schema  or SCHEMA
 
     if not WAREHOUSE_ID or WAREHOUSE_ID == "<your-warehouse-id>":
         return (
@@ -725,44 +620,20 @@ def refresh_setup(n_clicks, catalog, schema, step_cache, job_ids_data, acc1_acti
                  html.Strong("Settings"), " tab for current configuration."],
                 color="danger", className="py-2",
             )),
-            False, "", [], {}, {}, step_cache, job_ids_data or {},
+            False, "", [], "", False,
         )
 
-    job_ids_data = job_ids_data or {}
-    job1_id      = job_ids_data.get("job1_id")
-    job2_id      = job_ids_data.get("job2_id")
-
-    if job1_id is None or job2_id is None:
-        found1, found2 = find_job_ids()
-        if job1_id is None:
-            job1_id = found1
-        if job2_id is None:
-            job2_id = found2
-    new_job_ids = {"job1_id": job1_id, "job2_id": job2_id}
-
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        f_steps = ex.submit(_check_step_statuses, cat, sch, step_cache)
-        f_run1  = ex.submit(get_active_run, job1_id) if job1_id else None
-        f_run2  = ex.submit(get_active_run, job2_id) if job2_id else None
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_steps = ex.submit(_check_step_statuses, cat, sch)
         f_ka_ep = ex.submit(_chk_ka_endpoint, KA_ENDPOINT_NAME)
-
-        steps, new_cache = f_steps.result()
-        job1_active = f_run1.result() if f_run1 else None
-        job2_active = f_run2.result() if f_run2 else None
-        ka_chk      = f_ka_ep.result()
-
-    for step in steps:
-        if step["status"] == "NOT_STARTED":
-            if step["step_id"] in JOB1_STEPS and job1_active:
-                step["status"] = "IN_PROGRESS"
-                step["detail"] = "Job 1 is running…"
-            elif step["step_id"] in JOB2_STEPS and job2_active:
-                step["status"] = "IN_PROGRESS"
-                step["detail"] = "Job 2 is running…"
+        f_vs_ep = ex.submit(_chk_vs_endpoint, VS_ENDPOINT_NAME)
+        steps  = f_steps.result()
+        ka_chk = f_ka_ep.result()
+        vs_chk = f_vs_ep.result()
 
     all_done  = all(s["status"] in DONE_STATUSES for s in steps)
     job1_done = all(s["status"] in DONE_STATUSES for s in steps if s["step_id"] in JOB1_STEPS)
-    now       = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now().strftime("%H:%M:%S")
 
     patients = []
     if job1_done:
@@ -771,20 +642,37 @@ def refresh_setup(n_clicks, catalog, schema, step_cache, job_ids_data, acc1_acti
         except Exception as e:
             logger.warning(f"Patient load failed: {e}")
 
-    ka_endpoint = KA_ENDPOINT_NAME
-
     wh_ok    = bool(WAREHOUSE_ID) and WAREHOUSE_ID not in ("", "<your-warehouse-id>")
-    prereqs1 = [{"icon": "fa-warehouse", "label": "SQL Warehouse", "value": WAREHOUSE_ID, "ok": wh_ok}]
+    vs_ep_ok = bool(VS_ENDPOINT_NAME) and VS_ENDPOINT_NAME not in ("", "<your-vs-endpoint>")
+    prereqs1 = [
+        {"icon": "fa-warehouse",    "label": "SQL Warehouse", "value": WAREHOUSE_ID,     "ok": wh_ok},
+        {"icon": "fa-circle-nodes", "label": "VS Endpoint",   "value": VS_ENDPOINT_NAME or "Not set",
+         "ok": vs_chk["ok"]},
+    ]
     prereqs2 = [{"icon": "fa-robot", "label": "KA Endpoint", "value": KA_ENDPOINT_NAME, "ok": ka_chk["ok"]}]
 
-    act1    = _job1_action(steps, job1_id, job1_active)
-    act2    = _job2_action(steps, job2_id, job2_active)
-    content = build_setup_tab_content(
-        steps, now, all_done, act1, act2, prereqs1, prereqs2,
-        accordion1_active=acc1_active,
-        accordion2_active=acc2_active,
-    )
-    return content, all_done, ka_endpoint, patients, act1, act2, new_cache, new_job_ids
+    job1_steps_done = all(s["status"] in DONE_STATUSES for s in steps if s["step_id"] in JOB1_STEPS)
+    job2_steps_done = all(s["status"] in DONE_STATUSES for s in steps if s["step_id"] in JOB2_STEPS)
+    act1 = {
+        "action":      "done" if job1_steps_done else "run_job1",
+        "job_id":      1,
+        "label":       "Run Data Setup",
+        "job_name":    DATA_SETUP_JOB_NAME,
+        "active_run":  None,
+        "description": "Creates catalog, ingests patient records, uploads ICD-10 PDFs",
+    }
+    act2 = {
+        "action":      "done" if job2_steps_done else "run_job2",
+        "job_id":      1,
+        "label":       "Run KA Setup",
+        "job_name":    AI_SETUP_JOB_NAME,
+        "active_run":  None,
+        "description": "Uploads ICD-10 PDFs and configures the Knowledge Assistant",
+    }
+
+    content = build_setup_tab_content(steps, now, all_done, act1, act2, prereqs1, prereqs2)
+    last_updated = [html.I(className="fa-regular fa-clock me-1"), f"Updated {now}"]
+    return content, all_done, KA_ENDPOINT_NAME, patients, last_updated, all_done
 
 
 def _trigger_job(action: dict) -> tuple:
@@ -815,41 +703,23 @@ def _trigger_job(action: dict) -> tuple:
     Output("job1-trigger-result", "children"),
     Output("job1-trigger-btn",    "disabled"),
     Input("job1-trigger-btn",     "n_clicks"),
-    State("job1-action-store",    "data"),
     prevent_initial_call=True,
 )
-def handle_job1_trigger(n_clicks, action):
-    if not n_clicks or not action:
+def handle_job1_trigger(n_clicks):
+    if not n_clicks:
         return dash.no_update, dash.no_update
-    return _trigger_job(action)
+    job1_id, _ = _get_job_ids()
+    return _trigger_job({"job_id": job1_id, "job_name": DATA_SETUP_JOB_NAME})
 
 
 @callback(
     Output("job2-trigger-result", "children"),
     Output("job2-trigger-btn",    "disabled"),
     Input("job2-trigger-btn",     "n_clicks"),
-    State("job2-action-store",    "data"),
     prevent_initial_call=True,
 )
-def handle_job2_trigger(n_clicks, action):
-    if not n_clicks or not action:
+def handle_job2_trigger(n_clicks):
+    if not n_clicks:
         return dash.no_update, dash.no_update
-    return _trigger_job(action)
-
-
-@callback(
-    Output("accordion1-active-store", "data"),
-    Input("accordion-group1",         "active_item"),
-    prevent_initial_call=True,
-)
-def save_accordion1_state(active_item):
-    return active_item
-
-
-@callback(
-    Output("accordion2-active-store", "data"),
-    Input("accordion-group2",         "active_item"),
-    prevent_initial_call=True,
-)
-def save_accordion2_state(active_item):
-    return active_item
+    _, job2_id = _get_job_ids()
+    return _trigger_job({"job_id": job2_id, "job_name": AI_SETUP_JOB_NAME})

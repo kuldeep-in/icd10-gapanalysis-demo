@@ -2,7 +2,7 @@ import json
 import re
 
 import dash
-from dash import dcc, html, callback, Input, Output, State, ALL, callback_context
+from dash import dcc, html, callback, clientside_callback, Input, Output, State, ALL, callback_context
 import dash_bootstrap_components as dbc
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
@@ -125,6 +125,42 @@ def icd10_layout(patients: list[dict]) -> dbc.Container:
     options = patient_options(patients)
     return dbc.Container([
         dbc.Row([
+            dbc.Col(html.H5(
+                [html.I(className="fa-solid fa-file-medical me-2 text-info"), "ICD-10 Analyzer"],
+                className="mb-0 fw-bold"), width="auto"),
+        ], className="mb-3"),
+        # Healthcare-themed loading modal — shown immediately on button click,
+        # locked (backdrop=static) until the server callback closes it.
+        dbc.Modal([
+            dbc.ModalBody([
+                html.Div([
+                    html.Div(
+                        html.I(className="fa-solid fa-heart-pulse fa-beat fa-3x text-danger"),
+                        className="mb-3",
+                    ),
+                    html.H5("Analyzing Clinical Record", className="fw-bold mb-1"),
+                    html.P("AI model is processing your clinical notes",
+                           className="text-muted small mb-3"),
+                    dbc.Progress(
+                        value=100, striped=True, animated=True,
+                        color="danger", style={"height": "6px"}, className="mb-4",
+                    ),
+                    html.Div([
+                        html.Div([html.I(className="fa-solid fa-file-waveform me-2 text-primary"),
+                                  "Reading clinical notes"],
+                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                        html.Div([html.I(className="fa-solid fa-brain me-2 text-warning"),
+                                  "Processing with Claude AI"],
+                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                        html.Div([html.I(className="fa-solid fa-list-check me-2 text-success"),
+                                  "Identifying ICD-10 codes"],
+                                 className="small text-muted d-flex align-items-center justify-content-center"),
+                    ]),
+                ], className="text-center py-2"),
+            ]),
+        ], id="icd10-loading-modal", is_open=False, centered=True,
+           backdrop="static", keyboard=False, size="sm"),
+        dbc.Row([
             dbc.Col([
                 html.Label("Select Patient", className="fw-semibold mb-1"),
                 dcc.Dropdown(id="icd10-patient-select", options=options,
@@ -151,12 +187,9 @@ def icd10_layout(patients: list[dict]) -> dbc.Container:
             ], width=5),
             dbc.Col([
                 html.Label("ICD-10 Code Suggestions", className="fw-semibold mb-1"),
-                dbc.Spinner(
-                    html.Div(id="icd10-results",
-                             children=dbc.Alert("Select a patient and click Analyze.",
-                                                color="secondary")),
-                    color="primary",
-                ),
+                html.Div(id="icd10-results",
+                         children=dbc.Alert("Select a patient and click Analyze.",
+                                            color="secondary")),
             ], width=7),
         ], className="mt-2 g-4"),
     ], fluid=True)
@@ -187,10 +220,23 @@ def load_record_icd10(patient_id, catalog, schema):
     return record["clinicalrecord"], False, patient_id, saved
 
 
+# Open healthcare modal immediately on button click (no server round-trip needed)
+clientside_callback(
+    """function(n) {
+        if (n > 0) return true;
+        return window.dash_clientside.no_update;
+    }""",
+    Output("icd10-loading-modal", "is_open"),
+    Input("icd10-analyze-btn",    "n_clicks"),
+    prevent_initial_call=True,
+)
+
+
 @callback(
     Output("icd10-results",           "children"),
     Output("icd10-codes-store",       "data"),
     Output("icd10-sync-banner",       "is_open"),
+    Output("icd10-loading-modal",     "is_open", allow_duplicate=True),
     Input("icd10-analyze-btn",        "n_clicks"),
     State("icd10-clinical-record",    "value"),
     State("icd10-patient-store",      "data"),
@@ -199,14 +245,14 @@ def load_record_icd10(patient_id, catalog, schema):
 )
 def run_icd10(n_clicks, text, patient_id, saved_codes_list):
     if not n_clicks or not text:
-        return dash.no_update, dash.no_update, False
+        return dash.no_update, dash.no_update, False, dash.no_update
     try:
         saved_codes = set(saved_codes_list or [])
         codes       = call_icd10_model(text)
-        return _render_icd10_results(codes, patient_id or "patient", saved_codes), codes, False
+        return _render_icd10_results(codes, patient_id or "patient", saved_codes), codes, False, False
     except Exception as e:
         logger.error(f"ICD-10 analysis: {e}")
-        return dbc.Alert(f"Analysis failed: {e}", color="danger"), [], False
+        return dbc.Alert(f"Analysis failed: {e}", color="danger"), [], False, False
 
 
 @callback(

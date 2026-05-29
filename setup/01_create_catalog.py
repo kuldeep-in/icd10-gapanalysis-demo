@@ -55,13 +55,15 @@ COMMENT 'Synthetic patient clinical records — SOAP format notes'
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.icd10_analysis_results (
-    patient_id        STRING NOT NULL,
-    analyzed_at       TIMESTAMP,
-    icd10_suggestions STRING,
-    raw_response      STRING
+    patient_id  STRING NOT NULL,
+    analyzed_at TIMESTAMP,
+    code        STRING,
+    diag_type   STRING,
+    description STRING,
+    confidence  STRING
 )
 USING DELTA
-COMMENT 'ICD-10 code suggestions returned by the Knowledge Assistant'
+COMMENT 'ICD-10 code analysis results saved by the ICD-10 Analyzer'
 """)
 
 spark.sql(f"""
@@ -123,6 +125,7 @@ if APP_SP_ID:
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.patient_records TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_rules TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.bootstrap_status TO `{APP_SP_ID}`",
+        f"GRANT MODIFY ON TABLE `{CATALOG}`.`{SCHEMA}`.bootstrap_status TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.icd10_analysis_results TO `{APP_SP_ID}`",
         f"GRANT SELECT ON TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_findings TO `{APP_SP_ID}`",
         f"GRANT MODIFY ON TABLE `{CATALOG}`.`{SCHEMA}`.care_gap_findings TO `{APP_SP_ID}`",
@@ -150,4 +153,5 @@ WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
 """)
 
 print("Step 1 complete")
+
 

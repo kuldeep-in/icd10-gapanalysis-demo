@@ -3,13 +3,13 @@ bundle:
 
 variables:
   catalog:
-    default: classic_stable_kuldeep
+    default: <>
     description: Unity Catalog name
   schema:
-    default: icd10_care_gap02
+    default: <>
     description: Schema name (single schema used for all tables and the icd10_reference_pdfs volume)
   warehouse_id:
-    default: "<your-warehouse-id>"
+    default: ""
     description: >
       SQL warehouse ID used by the Databricks App for Delta queries. Referenced in app/app.yaml resources block — databricks apps deploy automatically grants the app SP CAN_USE on this warehouse.
   data_setup_job_name:
@@ -26,6 +26,11 @@ variables:
   fmapi_endpoint:
     default: "databricks-claude-sonnet-4-6"
     description: Databricks Foundation Model API endpoint used by the Care Gap Advisor.
+  vs_endpoint_name:
+    default: "caregap_rules_vs_endpoint"
+    description: >
+      Databricks Vector Search endpoint used for care gap rule retrieval.
+      Must be ONLINE before running Job 1. rag_pdf_vs_endpoint is pre-existing on fevm01.
   ka_display_name:
     default: "ICD-10 Clinical Reference Assistant"
     description: >
@@ -48,7 +53,15 @@ targets:
   dev:
     mode: development
     workspace:
-      host: https://adb-7405615754965401.1.azuredatabricks.net
+      host: https://adb-123456789.1.azuredatabricks.net
+      file_path: /Workspace/Users/<>/icd10-gapanalysis-demo
+
+sync:
+  exclude:
+    - app/**          # deployed via 'databricks apps deploy', not bundle sync
+    - data/**         # data files belong in UC Volume, not local filesystem
+    - "*.md"          # documentation files
+    - .gitignore
 
 include:
   - resources/*.yml

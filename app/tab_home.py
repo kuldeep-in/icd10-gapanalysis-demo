@@ -8,16 +8,16 @@ from db import (
     delete_care_gap_finding, delete_icd10_saved_code,
 )
 
-_P_COLOR   = {"HIGH": "danger",  "MEDIUM": "warning", "LOW": "info"}
+_P_COLOR    = {"HIGH": "danger",  "MEDIUM": "warning", "LOW": "info"}
 _TYPE_COLOR = {"Primary Diagnosis": "danger", "Secondary Diagnosis": "primary"}
 
 
 # ---------------------------------------------------------------------------
-# Cell renderers
+# Expanded-row content helpers (no Td wrapper — used inside accordion body)
 # ---------------------------------------------------------------------------
-def _icd10_cell(pid: str, codes: list[dict]) -> html.Td:
+def _icd10_items(pid: str, codes: list[dict]) -> html.Div:
     if not codes:
-        return html.Td(html.Small("—", className="text-muted"), className="align-top")
+        return html.Small("No ICD-10 codes saved yet.", className="text-muted fst-italic")
     items = []
     for c in codes:
         code      = c.get("code", "")
@@ -33,7 +33,7 @@ def _icd10_cell(pid: str, codes: list[dict]) -> html.Td:
                 ),
                 html.Span(html.Strong(code), className="me-1 text-nowrap"),
                 html.Small(desc, className="text-muted me-auto text-truncate",
-                           style={"maxWidth": "180px"}),
+                           style={"maxWidth": "200px"}),
                 dbc.Button(
                     html.I(className="fa-solid fa-trash-can"),
                     id={"type": "home-icd10-delete-btn", "patient": pid, "code": code},
@@ -41,19 +41,18 @@ def _icd10_cell(pid: str, codes: list[dict]) -> html.Td:
                     className="text-danger p-0 ms-1 flex-shrink-0",
                     style={"lineHeight": "1"},
                 ),
-            ], className="d-flex align-items-center py-1 border-bottom gap-1",
-               style={"minWidth": "260px"})
+            ], className="d-flex align-items-center py-1 border-bottom gap-1")
         )
-    return html.Td(html.Div(items), className="align-top")
+    return html.Div(items)
 
 
-def _gap_cell(pid: str, findings: list[dict]) -> html.Td:
+def _gap_items(pid: str, findings: list[dict]) -> html.Div:
     if not findings:
-        return html.Td(html.Small("—", className="text-muted"), className="align-top")
+        return html.Small("No care gaps identified yet.", className="text-muted fst-italic")
     items = []
     for f in findings:
-        priority = f.get("priority", "")
-        gap_name = f.get("gap_name", "—")
+        priority  = f.get("priority", "")
+        gap_name  = f.get("gap_name", "—")
         condition = f.get("condition", "")
         rule_id   = f.get("rule_id", "")
         items.append(
@@ -66,7 +65,7 @@ def _gap_cell(pid: str, findings: list[dict]) -> html.Td:
                 ),
                 html.Span(gap_name, className="small fw-semibold me-1 text-nowrap"),
                 html.Small(condition, className="text-muted me-auto text-truncate",
-                           style={"maxWidth": "160px"}),
+                           style={"maxWidth": "200px"}),
                 dbc.Button(
                     html.I(className="fa-solid fa-trash-can"),
                     id={"type": "home-gap-delete-btn", "patient": pid, "rule": rule_id},
@@ -74,82 +73,132 @@ def _gap_cell(pid: str, findings: list[dict]) -> html.Td:
                     className="text-danger p-0 ms-1 flex-shrink-0",
                     style={"lineHeight": "1"},
                 ),
-            ], className="d-flex align-items-center py-1 border-bottom gap-1",
-               style={"minWidth": "240px"})
+            ], className="d-flex align-items-center py-1 border-bottom gap-1")
         )
-    return html.Td(html.Div(items), className="align-top")
+    return html.Div(items)
+
+
+# ---------------------------------------------------------------------------
+# Accordion item per patient
+# ---------------------------------------------------------------------------
+def _patient_accordion_item(p: dict, codes: list[dict], findings: list[dict]) -> dbc.AccordionItem:
+    pid    = p["patient_id"]
+    gender = p.get("gender", "")
+    dob    = str(p.get("dob", ""))[:10]
+
+    # ICD badge strip (collapsed title) — up to 4 codes then +N
+    icd_badges = []
+    for c in codes[:4]:
+        diag_type = c.get("diag_type", "")
+        color     = "danger" if "Primary" in diag_type else "primary"
+        icd_badges.append(
+            dbc.Badge(c.get("code", ""), color=color, pill=True,
+                      className="font-monospace", style={"fontSize": "10px"})
+        )
+    if len(codes) > 4:
+        icd_badges.append(
+            dbc.Badge(f"+{len(codes) - 4}", color="secondary", pill=True,
+                      style={"fontSize": "10px"})
+        )
+
+    n_gaps   = len(findings)
+    has_high = any(f.get("priority") == "HIGH" for f in findings)
+    gap_color      = "danger" if has_high else ("warning" if n_gaps > 0 else "light")
+    gap_text_color = "white"  if (has_high or n_gaps > 0) else None
+    gap_style      = {"fontSize": "10px"} if n_gaps > 0 else {"fontSize": "10px", "color": "#198754"}
+
+    title = html.Div([
+        html.Span(pid, className="fw-bold me-3", style={"minWidth": "70px"}),
+        html.Small(f"{gender}, {dob}", className="text-muted me-3",
+                   style={"minWidth": "130px"}),
+        dbc.Badge(
+            f"{n_gaps} gap{'s' if n_gaps != 1 else ''}",
+            color=gap_color, text_color=gap_text_color,
+            pill=True, className="me-3", style=gap_style,
+        ),
+        html.Div(
+            icd_badges if icd_badges
+            else [html.Small("No ICD-10 codes", className="text-muted")],
+            className="d-flex flex-wrap gap-1",
+        ),
+    ], className="d-flex align-items-center flex-wrap gap-2 w-100")
+
+    body = dbc.Row([
+        dbc.Col([
+            html.P([html.I(className="fa-solid fa-stethoscope me-1 text-success"),
+                    "Care Gaps"],
+                   className="fw-semibold small text-muted mb-2"),
+            _gap_items(pid, findings),
+        ], md=6, className="pe-3"),
+        dbc.Col([
+            html.P([html.I(className="fa-solid fa-file-medical me-1 text-info"),
+                    "ICD-10 Codes"],
+                   className="fw-semibold small text-muted mb-2"),
+            _icd10_items(pid, codes),
+        ], md=6, className="ps-3 border-start"),
+    ], className="py-2 g-0")
+
+    return dbc.AccordionItem(body, title=title, item_id=pid)
 
 
 # ---------------------------------------------------------------------------
 # Overview builder
 # ---------------------------------------------------------------------------
-def _build_overview(
-    patients: list[dict], all_findings: dict, all_icd10: dict
-) -> html.Div:
+def _build_overview(patients: list[dict], all_findings: dict, all_icd10: dict) -> html.Div:
     if not patients:
-        return dbc.Alert(
+        return dbc.Container(dbc.Alert(
             [html.I(className="fa-solid fa-hourglass-half me-2"),
-             "No patient records found. Run the Data Setup job from the ",
-             html.Strong("Setup"), " tab."],
-            color="warning",
-        )
+             html.Strong("No patient records found. "),
+             "Click the ", html.Strong("⚙ Setup"), " icon in the navbar and run the Data Setup job."],
+            color="warning", className="mt-3",
+        ), fluid=True)
 
-    total_icd10 = sum(len(v) for v in all_icd10.values())
-    total_gaps  = sum(len(v) for v in all_findings.values())
-    high_gaps   = sum(1 for v in all_findings.values()
-                      for f in v if f.get("priority") == "HIGH")
+    total_icd10   = sum(len(v) for v in all_icd10.values())
+    total_gaps    = sum(len(v) for v in all_findings.values())
+    high_gaps     = sum(1 for v in all_findings.values()
+                        for f in v if f.get("priority") == "HIGH")
+    missing_icd10 = sum(1 for p in patients
+                        if not all_icd10.get(p["patient_id"]))
 
-    def _stat(value, label, color):
-        return dbc.Col(
-            dbc.Card(dbc.CardBody([
-                html.H4(str(value), className=f"mb-0 text-{color}"),
-                html.Small(label, className="text-muted"),
-            ], className="py-2 text-center"), className="h-100 shadow-sm"),
-            xs=6, md=True, className="mb-2",
-        )
+    def _stat(value, label, color, tall=False):
+        return dbc.Card(dbc.CardBody([
+            html.H4(str(value), className=f"mb-0 text-{color}"),
+            html.Small(label, className="text-muted"),
+        ], className="py-2 text-center d-flex flex-column justify-content-center",
+           style={"minHeight": "90px"} if tall else {}),
+        className="shadow-sm h-100")
 
-    stats = dbc.Row([
-        _stat(len(patients), "Patients",          "primary"),
-        _stat(total_icd10,   "ICD-10 Codes",      "info"),
-        _stat(total_gaps,    "Care Gaps",          "secondary"),
-        _stat(high_gaps,     "High Priority Gaps", "danger"),
-    ], className="mb-3 g-2")
+    stats_col = html.Div([
+        dbc.Row([
+            dbc.Col(_stat(len(patients), "Patients", "primary"), className="mb-2"),
+        ]),
+        dbc.Row([
+            dbc.Col(_stat(total_icd10,   "ICD-10 Codes",   "info",    tall=True), width=6),
+            dbc.Col(_stat(missing_icd10, "Missing ICD-10", "warning", tall=True), width=6),
+        ], className="mb-2 g-2"),
+        dbc.Row([
+            dbc.Col(_stat(total_gaps, "Care Gaps",          "secondary", tall=True), width=6),
+            dbc.Col(_stat(high_gaps,  "High Priority Gaps", "danger",    tall=True), width=6),
+        ], className="g-2"),
+    ])
 
-    tbody_rows = []
-    for p in patients:
-        pid      = p["patient_id"]
-        gender   = p.get("gender", "")
-        dob      = str(p.get("dob", ""))
-        codes    = all_icd10.get(pid, [])
-        findings = all_findings.get(pid, [])
-
-        tbody_rows.append(html.Tr([
-            html.Td(html.Strong(pid), className="align-top text-nowrap"),
-            html.Td(html.Small(gender, className="text-muted"), className="align-top text-nowrap"),
-            html.Td(html.Small(dob,    className="text-muted"), className="align-top text-nowrap"),
-            _icd10_cell(pid, codes),
-            _gap_cell(pid, findings),
-        ]))
-
-    table = dbc.Table(
-        [
-            html.Thead(html.Tr([
-                html.Th("Patient ID"),
-                html.Th("Gender"),
-                html.Th("DOB"),
-                html.Th("Saved ICD-10 Codes"),
-                html.Th("Identified Care Gaps"),
-            ]), className="table-dark"),
-            html.Tbody(tbody_rows),
-        ],
-        bordered=False, hover=True, responsive=True, size="sm",
-        className="mb-0 align-middle",
+    accordion = dbc.Accordion(
+        [_patient_accordion_item(
+             p,
+             all_icd10.get(p["patient_id"], []),
+             all_findings.get(p["patient_id"], []),
+         )
+         for p in patients],
+        id="home-patient-accordion",
+        always_open=True,
+        active_item=[],
+        className="shadow-sm",
     )
 
-    return html.Div([
-        stats,
-        dbc.Card(dbc.CardBody(table, className="p-0"), className="shadow-sm"),
-    ])
+    return dbc.Row([
+        dbc.Col(stats_col, md=3),
+        dbc.Col(accordion,  md=9),
+    ], className="g-3")
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +246,18 @@ def refresh_overview(n_clicks, catalog, schema):
         all_icd10    = get_all_icd10_saved_codes(cat, sch)
     except Exception as e:
         logger.error(f"Home overview load failed: {e}")
-        return dbc.Alert(f"Error loading data: {e}", color="danger"), [], {}, {}
+        if any(x in str(e) for x in ("TABLE_OR_VIEW_NOT_FOUND", "TABLE_NOT_FOUND",
+                                      "does not exist", "SCHEMA_NOT_FOUND")):
+            return dbc.Container(dbc.Alert(
+                [html.I(className="fa-solid fa-hourglass-half me-2"),
+                 html.Strong("No patient records found. "),
+                 "Click the ", html.Strong("⚙ Setup"), " icon in the navbar and run the Data Setup job."],
+                color="warning", className="mt-3",
+            ), fluid=True), [], {}, {}
+        return dbc.Container(
+            dbc.Alert(f"Error loading data: {e}", color="danger", className="mt-3"),
+            fluid=True,
+        ), [], {}, {}
     return _build_overview(patients, all_findings, all_icd10), patients, all_findings, all_icd10
 
 

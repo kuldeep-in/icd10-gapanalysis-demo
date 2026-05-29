@@ -1,5 +1,5 @@
 # ── Databricks ──────────────────────────────────────────────────────────────
-# DAB state directory — contains cached workspace state and may hold auth tokens
+# DAB state — contains cached workspace sync state
 .databricks/
 
 # Databricks Connect local config
@@ -7,25 +7,8 @@
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-*.pyd
-.Python
-*.egg
-*.egg-info/
-dist/
-build/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.whl
-.installed.cfg
-MANIFEST
 
 # Virtual environments
 venv/
@@ -33,8 +16,6 @@ venv/
 env/
 .env/
 ENV/
-env.bak/
-venv.bak/
 
 # ── Secrets / credentials ────────────────────────────────────────────────────
 .env
@@ -49,32 +30,22 @@ secrets.yaml
 *secret*
 !app/app.yaml
 
-# ── Jupyter / notebooks ──────────────────────────────────────────────────────
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
 # ── IDE ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
-.DS_Store
-Thumbs.db
 
 # ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
-.DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-ehthumbs.db
 Thumbs.db
+ehthumbs.db
 
-# ── Test / coverage ──────────────────────────────────────────────────────────
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# ── ICD-10 PDFs (large binary files — commit .gitkeep only) ─────────────────
+# ── ICD-10 PDFs (large binary files — stored in UC Volume, not in git) ───────
 data/icd10_pdfs/*.pdf
+
+# ── Local personal notes — git-ignored, safe for personal observations ───────
+LOCAL.yml

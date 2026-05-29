@@ -53,6 +53,19 @@ resources:
               catalog: ${var.catalog}
               schema: ${var.schema}
 
+        - task_key: create_vs_index
+          description: Add embedding_text to care_gap_rules and create Vector Search index for semantic rule retrieval
+          depends_on:
+            - task_key: setup_care_gap_rules
+          environment_key: default
+          notebook_task:
+            notebook_path: ${workspace.file_path}/setup/06_create_care_gap_vs_index
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              app_sp_id: ${var.app_service_principal}
+              vs_endpoint_name: ${var.vs_endpoint_name}
+
     # ── Job 2: Knowledge Assistant Setup (Serverless) ────────────────────────
     # Uploads ICD-10 PDFs to the UC Volume and attaches the volume to the KA.
     # Knowledge Assistant is created by setup_resources.py (pre-deploy) — not here.

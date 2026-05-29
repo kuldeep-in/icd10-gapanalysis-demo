@@ -13,10 +13,13 @@ AI_SETUP_JOB_NAME   = os.getenv("AI_SETUP_JOB_NAME")
 KA_ENDPOINT_NAME    = os.getenv("KA_ENDPOINT_NAME")
 KA_NAME             = os.getenv("KA_NAME")
 FMAPI_ENDPOINT      = os.getenv("FMAPI_ENDPOINT")
+VS_ENDPOINT_NAME    = os.getenv("VS_ENDPOINT_NAME")
+# VS index name is always deterministic — derived from catalog + schema at runtime
+VS_INDEX_NAME       = f"{CATALOG}.{SCHEMA}.care_gap_rules_vs_index" if CATALOG and SCHEMA else None
 
 BRAND_ORANGE = "#E87722"
 
-JOB1_STEPS = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data"}
+JOB1_STEPS = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index"}
 JOB2_STEPS = {"load_icd10_pdfs", "ka_source_configured", "ka_source_sync"}
 
 BOOTSTRAP_STEPS = [
@@ -48,8 +51,18 @@ BOOTSTRAP_STEPS = [
         "icon":        "fa-notes-medical",
     },
     {
-        "step_id":     "load_icd10_pdfs",
+        "step_id":     "care_gap_vs_index",
         "seq":         4,
+        "group":       1,
+        "label":       "Care Gap VS Index Ready",
+        "description": "Vector Search index on care_gap_rules is ONLINE and all rules are embedded "
+                       "using databricks-gte-large-en. Required for semantic rule retrieval in "
+                       "the Care Gap Advisor.",
+        "icon":        "fa-magnifying-glass",
+    },
+    {
+        "step_id":     "load_icd10_pdfs",
+        "seq":         5,
         "group":       2,
         "label":       "ICD-10 Reference PDFs Uploaded to Volume",
         "description": "Download ICD-10 PDF reference files from GitHub directly into the "
@@ -58,7 +71,7 @@ BOOTSTRAP_STEPS = [
     },
     {
         "step_id":     "ka_source_configured",
-        "seq":         5,
+        "seq":         6,
         "group":       2,
         "label":       "ICD-10 PDF Volume Configured",
         "description": "Checks that the icd10_reference_pdfs UC Volume is attached to the "
@@ -67,7 +80,7 @@ BOOTSTRAP_STEPS = [
     },
     {
         "step_id":     "ka_source_sync",
-        "seq":         6,
+        "seq":         7,
         "group":       2,
         "label":       "ICD-10 PDF Sync",
         "description": "Checks the Knowledge Assistant's indexing state for the attached volume. "

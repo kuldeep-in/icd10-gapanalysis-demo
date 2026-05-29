@@ -2,7 +2,7 @@ import json
 import re
 
 import dash
-from dash import dcc, html, callback, Input, Output, State, MATCH, ALL, callback_context
+from dash import dcc, html, callback, clientside_callback, Input, Output, State, MATCH, ALL, callback_context
 import dash_bootstrap_components as dbc
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
@@ -13,30 +13,84 @@ from db import (
     get_patient_care_gap_findings, patient_options,
 )
 
+# ---------------------------------------------------------------------------
+# Rule retrieval — Vector Search primary, full-table fallback
+# ---------------------------------------------------------------------------
+_rules_cache: list[dict] = []
+_VS_NUM_RESULTS = 15   # max rules retrieved per query; covers all 20 current rules
+                        # scales to hundreds without changing this number
+
+
+def _get_all_rules(cat: str, sch: str) -> list[dict]:
+    """Fallback: return all rules from DB (cached)."""
+    global _rules_cache
+    if not _rules_cache:
+        _rules_cache = get_care_gap_rules(cat, sch)
+    return _rules_cache
+
+
+def _retrieve_relevant_rules(clinical_text: str, cat: str, sch: str) -> list[dict]:
+    """
+    Use Vector Search (raw REST API) to retrieve the most semantically relevant
+    care gap rules for this patient's clinical note.  The index embeds rich medical
+    text so clinical abbreviations, medication names, and lab values all contribute
+    to retrieval — no ICD-10 codes needed.
+
+    Falls back to all rules if VS is unavailable or not yet configured.
+    """
+    index = f"{cat}.{sch}.care_gap_rules_vs_index"
+    try:
+        resp = w.api_client.do(
+            "POST",
+            f"/api/2.0/vector-search/indexes/{index}/query",
+            body={
+                "query_text": clinical_text[:3000],
+                "columns":    ["rule_id", "gap_name", "condition",
+                               "check_description", "priority", "guideline"],
+                "num_results": _VS_NUM_RESULTS,
+            },
+        )
+        # Response: {"result": {"data_array": [[...]], ...}, "manifest": {"schema": {"columns": [...]}}}
+        data_array = (resp.get("result") or {}).get("data_array") or []
+        if not data_array:
+            logger.warning("VS returned no results — falling back to all rules")
+            return _get_all_rules(cat, sch)
+        cols  = [c["name"] for c in (resp.get("manifest") or {}).get("schema", {}).get("columns", [])]
+        rules = [dict(zip(cols, row)) for row in data_array]
+        logger.info(f"VS retrieved {len(rules)} relevant rules from {index}")
+        return rules
+    except Exception as e:
+        logger.warning(f"VS query failed ({e}) — falling back to all rules")
+        return _get_all_rules(cat, sch)
+
 
 # ---------------------------------------------------------------------------
 # AI helper
 # ---------------------------------------------------------------------------
 def call_care_gap_model(patient_record: dict, rules: list[dict]) -> list[dict]:
     rules_text = "\n".join(
-        f"- [{r['rule_id']}] {r['gap_name']} ({r['condition']}): "
-        f"{r['check_description']} [Priority: {r['priority']}] — Guideline: {r['guideline']}"
+        f"[{r['rule_id']}] {r['gap_name']} ({r['condition']}): "
+        f"{r['check_description']} | {r['priority']} | {r['guideline']}"
         for r in rules
     )
     response = w.serving_endpoints.query(
         name=FMAPI_ENDPOINT,
         messages=[
             ChatMessage(role=ChatMessageRole.SYSTEM, content=(
-                "You are a clinical care gap analyzer. Identify which care gaps apply "
-                "to the patient. Return a JSON array only — each object must have: "
+                "You are a clinical care gap analyzer. Given a patient record and a set of "
+                "care gap rules, identify ONLY the gaps that apply based on what is documented. "
+                "Return a JSON array only — each object must have: "
                 "rule_id, gap_name, condition, priority (HIGH/MEDIUM/LOW), guideline, "
-                "finding, recommended_action. No prose, no markdown."
+                "finding (what in the record triggers this gap), recommended_action. "
+                "No prose, no markdown."
             )),
             ChatMessage(role=ChatMessageRole.USER, content=(
                 f"Patient Record:\n{patient_record['clinicalrecord']}\n\n"
-                f"Care Gap Rules:\n{rules_text}\n\nReturn applicable gaps as JSON array."
+                f"Care Gap Rules to evaluate:\n{rules_text}\n\n"
+                f"Return applicable gaps as JSON array."
             )),
         ],
+        max_tokens=2000,
     )
     raw = response.choices[0].message.content
     m = re.search(r"\[.*\]", raw, re.DOTALL)
@@ -100,6 +154,41 @@ def gap_layout(patients: list[dict]) -> dbc.Container:
     options = patient_options(patients)
     return dbc.Container([
         dbc.Row([
+            dbc.Col(html.H5(
+                [html.I(className="fa-solid fa-stethoscope me-2 text-success"), "Care Gap Advisor"],
+                className="mb-0 fw-bold"), width="auto"),
+        ], className="mb-3"),
+        # Healthcare-themed loading modal — locked until server callback closes it.
+        dbc.Modal([
+            dbc.ModalBody([
+                html.Div([
+                    html.Div(
+                        html.I(className="fa-solid fa-stethoscope fa-beat fa-3x text-success"),
+                        className="mb-3",
+                    ),
+                    html.H5("Identifying Care Gaps", className="fw-bold mb-1"),
+                    html.P("Comparing against clinical guidelines",
+                           className="text-muted small mb-3"),
+                    dbc.Progress(
+                        value=100, striped=True, animated=True,
+                        color="success", style={"height": "6px"}, className="mb-4",
+                    ),
+                    html.Div([
+                        html.Div([html.I(className="fa-solid fa-notes-medical me-2 text-info"),
+                                  "Reviewing patient history"],
+                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                        html.Div([html.I(className="fa-solid fa-magnifying-glass me-2 text-warning"),
+                                  "Matching clinical guidelines"],
+                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                        html.Div([html.I(className="fa-solid fa-shield-heart me-2 text-danger"),
+                                  "Assessing care gaps"],
+                                 className="small text-muted d-flex align-items-center justify-content-center"),
+                    ]),
+                ], className="text-center py-2"),
+            ]),
+        ], id="gap-loading-modal", is_open=False, centered=True,
+           backdrop="static", keyboard=False, size="sm"),
+        dbc.Row([
             dbc.Col([
                 html.Label("Select Patient", className="fw-semibold mb-1"),
                 dcc.Dropdown(id="gap-patient-select", options=options,
@@ -112,19 +201,13 @@ def gap_layout(patients: list[dict]) -> dbc.Container:
                     "Compares patient record against ADA, ACC/AHA, GOLD, NCCN, KDIGO guidelines.",
                     className="text-muted d-block mt-2"
                 ),
-                dbc.Spinner(
-                    html.Div(id="saved-findings-display"),
-                    color="success", size="sm",
-                ),
+                html.Div(id="saved-findings-display"),
             ], width=4),
             dbc.Col([
                 html.Label("AI Analysis", className="fw-semibold mb-1"),
-                dbc.Spinner(
-                    html.Div(id="gap-results",
-                             children=dbc.Alert("Select a patient and click Identify Care Gaps.",
-                                                color="secondary")),
-                    color="success",
-                ),
+                html.Div(id="gap-results",
+                         children=dbc.Alert("Select a patient and click Identify Care Gaps.",
+                                            color="secondary")),
             ], width=8),
         ], className="mt-2 g-4"),
     ], fluid=True)
@@ -151,10 +234,23 @@ def on_patient_select(patient_id, catalog, schema):
     return False, findings, patient_id
 
 
+# Open healthcare modal immediately on button click (no server round-trip needed)
+clientside_callback(
+    """function(n) {
+        if (n > 0) return true;
+        return window.dash_clientside.no_update;
+    }""",
+    Output("gap-loading-modal", "is_open"),
+    Input("gap-analyze-btn",    "n_clicks"),
+    prevent_initial_call=True,
+)
+
+
 @callback(
     Output("gap-results",          "children"),
     Output("gap-results-store",    "data"),
-    Output("gap-patient-id-store", "data", allow_duplicate=True),
+    Output("gap-patient-id-store", "data",   allow_duplicate=True),
+    Output("gap-loading-modal",    "is_open", allow_duplicate=True),
     Input("gap-analyze-btn",       "n_clicks"),
     State("gap-patient-select",    "value"),
     State("catalog-store",         "data"),
@@ -164,7 +260,7 @@ def on_patient_select(patient_id, catalog, schema):
 )
 def run_gaps(n_clicks, patient_id, catalog, schema, saved_findings):
     if not n_clicks or not patient_id:
-        return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     cat = catalog or CATALOG
     sch = schema  or SCHEMA
 
@@ -172,7 +268,7 @@ def run_gaps(n_clicks, patient_id, catalog, schema, saved_findings):
 
     try:
         patient = get_patient_record(patient_id, cat, sch)
-        rules   = get_care_gap_rules(cat, sch)
+        rules   = _retrieve_relevant_rules(patient["clinicalrecord"], cat, sch)
         gaps    = call_care_gap_model(patient, rules)
 
         if not gaps:
@@ -182,7 +278,7 @@ def run_gaps(n_clicks, patient_id, catalog, schema, saved_findings):
                      f"No care gaps identified for {patient_id}."],
                     color="success"
                 ),
-                [], patient_id,
+                [], patient_id, False,
             )
 
         P = {"HIGH": "danger", "MEDIUM": "warning", "LOW": "info"}
@@ -225,11 +321,11 @@ def run_gaps(n_clicks, patient_id, catalog, schema, saved_findings):
                 ),
                 *cards,
             ]),
-            gaps, patient_id,
+            gaps, patient_id, False,
         )
     except Exception as e:
         logger.error(f"Care gap analysis: {e}")
-        return dbc.Alert(f"Analysis failed: {e}", color="danger"), [], ""
+        return dbc.Alert(f"Analysis failed: {e}", color="danger"), [], "", False
 
 
 @callback(

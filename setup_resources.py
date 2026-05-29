@@ -10,13 +10,23 @@ KA endpoint logic:
   - If none match, creates a new KA with the display_name as-is.
   - Volume / knowledge source configuration is NOT done here — that is Job 2.
 
+VS endpoint logic:
+  - Checks whether the VS endpoint named vs_endpoint_name exists via
+    GET /api/2.0/vector-search/endpoints/{name}.
+  - If it exists and is ONLINE, uses it as-is.
+  - If it exists but is not yet ONLINE, waits up to 5 minutes.
+  - If it does not exist, creates it and waits for ONLINE state.
+  - VS index creation is NOT done here — that is Job 1 Task 4.
+
 Outputs shell variable assignments to stdout (consume via eval in deploy.sh).
 Progress messages go to stderr so they don't pollute the eval output.
 
 Usage (from deploy.sh):
     eval "$(python3 setup_resources.py --profile "$PROFILE" \
                 --catalog "$CATALOG" --schema "$SCHEMA" \
-                [--warehouse-id "$WAREHOUSE_ID"] [--ka-display-name "$KA_DISPLAY_NAME"])"
+                [--warehouse-id "$WAREHOUSE_ID"] \
+                [--ka-display-name "$KA_DISPLAY_NAME"] \
+                [--vs-endpoint-name "$VS_ENDPOINT_NAME"])"
 """
 
 import argparse
@@ -53,9 +63,10 @@ def _api_get(path: str) -> dict:
 
 
 def _api_post(path: str, body: dict) -> dict:
-    """POST /api/... via databricks api post, body passed via stdin."""
-    cmd = ["databricks", "api", "post", path, f"--profile={PROFILE}"]
-    result = subprocess.run(cmd, input=json.dumps(body), capture_output=True, text=True)
+    """POST /api/... via databricks api post, body passed via --json flag."""
+    cmd = ["databricks", "api", "post", path,
+           f"--profile={PROFILE}", "--json", json.dumps(body)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
     return json.loads(result.stdout) if result.stdout.strip() else {}
@@ -171,28 +182,86 @@ def resolve_ka_endpoint(ka_display_name: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Vector Search endpoint
+# ---------------------------------------------------------------------------
+def _wait_vs_online(endpoint_name: str, max_wait_s: int = 300) -> None:
+    """Poll until the VS endpoint reaches ONLINE state."""
+    _info(f"Waiting for VS endpoint '{endpoint_name}' to become ONLINE...")
+    for i in range(max_wait_s // 10):
+        time.sleep(10)
+        try:
+            data  = _api_get(f"/api/2.0/vector-search/endpoints/{endpoint_name}")
+            state = data.get("endpoint_status", {}).get("state", "")
+            if state == "ONLINE":
+                _info(f"✔ VS endpoint ONLINE after {(i + 1) * 10}s")
+                return
+            _info(f"[{(i + 1) * 10}s] State: {state} — waiting...")
+        except Exception:
+            _info(f"[{(i + 1) * 10}s] Endpoint not yet visible — waiting...")
+    _info("WARNING: VS endpoint did not reach ONLINE within timeout — continuing anyway")
+
+
+def resolve_vs_endpoint(endpoint_name: str, catalog: str, schema: str) -> tuple[str, str]:
+    """
+    Returns (endpoint_name, index_name).
+    Checks whether the named VS endpoint exists; creates it if not.
+    index_name is always derived as <catalog>.<schema>.care_gap_rules_vs_index.
+    """
+    index_name = f"{catalog}.{schema}.care_gap_rules_vs_index"
+    _info(f"Looking up VS endpoint: '{endpoint_name}'")
+
+    try:
+        data  = _api_get(f"/api/2.0/vector-search/endpoints/{endpoint_name}")
+        state = data.get("endpoint_status", {}).get("state", "")
+        _info(f"✔ VS endpoint found: {endpoint_name} (state: {state})")
+        if state != "ONLINE":
+            _wait_vs_online(endpoint_name)
+        else:
+            _info(f"✔ Already ONLINE")
+        return endpoint_name, index_name
+
+    except Exception as e:
+        err = str(e)
+        if not any(x in err for x in ("NOT_FOUND", "404", "does not exist", "not found", "RESOURCE_DOES_NOT_EXIST")):
+            raise
+
+    _info(f"VS endpoint '{endpoint_name}' not found — creating new one")
+    _api_post("/api/2.0/vector-search/endpoints", {
+        "name":          endpoint_name,
+        "endpoint_type": "STANDARD",
+    })
+    _info(f"✔ VS endpoint created: {endpoint_name}")
+    _wait_vs_online(endpoint_name)
+    return endpoint_name, index_name
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
     global PROFILE
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile",         default="DEFAULT", help="Databricks CLI profile")
-    parser.add_argument("--catalog",         required=True,     help="Unity Catalog name")
-    parser.add_argument("--schema",          required=True,     help="Schema name")
-    parser.add_argument("--warehouse-id",    default="",        help="SQL warehouse ID (created if empty)")
-    parser.add_argument("--ka-display-name", default="",        help="KA display name (created if not found)")
+    parser.add_argument("--profile",          default="DEFAULT",           help="Databricks CLI profile")
+    parser.add_argument("--catalog",          required=True,               help="Unity Catalog name")
+    parser.add_argument("--schema",           required=True,               help="Schema name")
+    parser.add_argument("--warehouse-id",     default="",                  help="SQL warehouse ID (created if empty)")
+    parser.add_argument("--ka-display-name",  default="",                  help="KA display name (created if not found)")
+    parser.add_argument("--vs-endpoint-name", default="rag_pdf_vs_endpoint", help="VS endpoint name (created if not found)")
     args = parser.parse_args()
 
     PROFILE = args.profile
 
     print("Resolving infrastructure resources...", file=sys.stderr)
 
-    print("\n[1/2] SQL Warehouse", file=sys.stderr)
+    print("\n[1/3] SQL Warehouse", file=sys.stderr)
     warehouse_id = resolve_warehouse(args.warehouse_id)
 
-    print("\n[2/2] Knowledge Assistant Endpoint", file=sys.stderr)
+    print("\n[2/3] Knowledge Assistant Endpoint", file=sys.stderr)
     ka_endpoint, ka_name = resolve_ka_endpoint(args.ka_display_name)
+
+    print("\n[3/3] Vector Search Endpoint", file=sys.stderr)
+    vs_endpoint, vs_index = resolve_vs_endpoint(args.vs_endpoint_name, args.catalog, args.schema)
 
     print("\n✔ All resources resolved\n", file=sys.stderr)
 
@@ -200,6 +269,7 @@ def main() -> None:
     print(f'WAREHOUSE_ID="{warehouse_id}"')
     print(f'KA_ENDPOINT_NAME="{ka_endpoint}"')
     print(f'KA_NAME="{ka_name}"')
+    print(f'VS_ENDPOINT_NAME="{vs_endpoint}"')
 
 
 if __name__ == "__main__":
