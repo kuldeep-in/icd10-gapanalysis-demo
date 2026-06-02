@@ -54,7 +54,6 @@ targets:
     mode: development
     workspace:
       host: https://adb-123456789.1.azuredatabricks.net
-      file_path: /Workspace/Users/<>/icd10-gapanalysis-demo
 
 sync:
   exclude:
