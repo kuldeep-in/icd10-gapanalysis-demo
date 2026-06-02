@@ -150,66 +150,155 @@ def _render_saved_findings(findings: list[dict]) -> html.Div | None:
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-def gap_layout(patients: list[dict]) -> dbc.Container:
-    options = patient_options(patients)
-    return dbc.Container([
-        dbc.Row([
-            dbc.Col(html.H5(
-                [html.I(className="fa-solid fa-stethoscope me-2 text-success"), "Care Gap Advisor"],
-                className="mb-0 fw-bold"), width="auto"),
-        ], className="mb-3"),
-        # Healthcare-themed loading modal — locked until server callback closes it.
-        dbc.Modal([
-            dbc.ModalBody([
-                html.Div([
-                    html.Div(
-                        html.I(className="fa-solid fa-stethoscope fa-beat fa-3x text-success"),
-                        className="mb-3",
-                    ),
-                    html.H5("Identifying Care Gaps", className="fw-bold mb-1"),
-                    html.P("Comparing against clinical guidelines",
-                           className="text-muted small mb-3"),
-                    dbc.Progress(
-                        value=100, striped=True, animated=True,
-                        color="success", style={"height": "6px"}, className="mb-4",
-                    ),
-                    html.Div([
-                        html.Div([html.I(className="fa-solid fa-notes-medical me-2 text-info"),
-                                  "Reviewing patient history"],
-                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
-                        html.Div([html.I(className="fa-solid fa-magnifying-glass me-2 text-warning"),
-                                  "Matching clinical guidelines"],
-                                 className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
-                        html.Div([html.I(className="fa-solid fa-shield-heart me-2 text-danger"),
-                                  "Assessing care gaps"],
-                                 className="small text-muted d-flex align-items-center justify-content-center"),
-                    ]),
-                ], className="text-center py-2"),
+def _build_gap_cards(gaps: list[dict], saved_rule_ids: set) -> html.Div:
+    """Build the care gap result cards (shared by run_gaps and gap_layout restore)."""
+    if not gaps:
+        return dbc.Alert(
+            [html.I(className="fa-solid fa-circle-check me-2"), "No care gaps identified."],
+            color="success",
+        )
+    P = {"HIGH": "danger", "MEDIUM": "warning", "LOW": "info"}
+    cards = []
+    for i, g in enumerate(gaps):
+        already_saved = g.get("rule_id") in saved_rule_ids
+        save_btn = dbc.Button(
+            [html.I(className=f"fa-solid {'fa-circle-check' if already_saved else 'fa-floppy-disk'} me-2"),
+             "Saved" if already_saved else "Save Finding"],
+            id={"type": "save-gap-btn", "index": i},
+            color="success" if already_saved else "outline-secondary",
+            disabled=already_saved, size="sm", className="mt-2", n_clicks=0,
+        )
+        cards.append(dbc.Card([
+            dbc.CardHeader([
+                dbc.Badge(g.get("priority", "?"),
+                          color=P.get(g.get("priority", ""), "secondary"), className="me-2"),
+                html.Strong(g.get("gap_name", "—")),
+                html.Small(f"  {g.get('condition', '')}", className="text-muted ms-1"),
             ]),
+            dbc.CardBody([
+                html.P([html.Strong("Finding: "),   g.get("finding", "—")],           className="mb-1 small"),
+                html.P([html.Strong("Action: "),    g.get("recommended_action", "—")], className="mb-1 small"),
+                html.P([html.Strong("Guideline: "), g.get("guideline", "—")],          className="mb-0 small text-muted"),
+                html.Div([save_btn, html.Div(id={"type": "save-gap-result", "index": i})],
+                         className="text-end"),
+            ]),
+        ], outline=True, color=P.get(g.get("priority", ""), "secondary"), className="mb-2 shadow-sm"))
+    return html.Div([
+        dbc.Alert(
+            [html.I(className="fa-solid fa-triangle-exclamation me-2"),
+             f"{len(gaps)} care gap(s) identified"],
+            color="warning", className="mb-3",
+        ),
+        *cards,
+    ])
+
+
+def gap_layout(patients: list[dict],
+               restore_patient: str = None,
+               restore_gaps: list = None,
+               restore_saved_findings: list = None) -> dbc.Container:
+    options        = patient_options(patients)
+    saved_rule_ids = {f.get("rule_id") for f in (restore_saved_findings or [])}
+    init_results   = (
+        _build_gap_cards(restore_gaps, saved_rule_ids)
+        if restore_gaps
+        else dbc.Alert("Analysis results will appear here after clicking Identify Care Gaps.",
+                       color="secondary")
+    )
+    init_saved = (_render_saved_findings(restore_saved_findings)
+                  if restore_saved_findings
+                  else dbc.Alert("Select a patient to see saved findings.", color="secondary"))
+
+    def _col_label(icon, text):
+        return html.Div([
+            html.I(className=f"fa-solid {icon} me-1"),
+            html.Span(text, className="fw-semibold"),
+        ], className="mb-1 small")
+
+    return dbc.Container([
+        # ── Title ───────────────────────────────────────
+        html.Div([
+            html.H4(
+                [html.I(className="fa-solid fa-stethoscope me-2 text-success"),
+                 "Care Gap Advisor"],
+                className="mb-0 fw-bold me-3 d-inline",
+            ),
+            html.Small(
+                "Compares against ADA, ACC/AHA, GOLD, NCCN, KDIGO guidelines.",
+                className="text-muted fw-normal",
+            ),
+        ], className="d-flex align-items-baseline flex-wrap mb-3"),
+
+        # Loading modal
+        dbc.Modal([
+            dbc.ModalBody([html.Div([
+                html.Div(html.I(className="fa-solid fa-stethoscope fa-beat fa-3x text-success"),
+                         className="mb-3"),
+                html.H5("Identifying Care Gaps", className="fw-bold mb-1"),
+                html.P("Comparing against clinical guidelines",
+                       className="text-muted small mb-3"),
+                dbc.Progress(value=100, striped=True, animated=True, color="success",
+                             style={"height": "6px"}, className="mb-4"),
+                html.Div([
+                    html.Div([html.I(className="fa-solid fa-notes-medical me-2 text-info"),
+                              "Reviewing patient history"],
+                             className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                    html.Div([html.I(className="fa-solid fa-magnifying-glass me-2 text-warning"),
+                              "Matching clinical guidelines"],
+                             className="small text-muted mb-2 d-flex align-items-center justify-content-center"),
+                    html.Div([html.I(className="fa-solid fa-shield-heart me-2 text-danger"),
+                              "Assessing care gaps"],
+                             className="small text-muted d-flex align-items-center justify-content-center"),
+                ]),
+            ], className="text-center py-2")]),
         ], id="gap-loading-modal", is_open=False, centered=True,
            backdrop="static", keyboard=False, size="sm"),
+
+        # ── Row 1: Patient select + Identify button ─────
         dbc.Row([
             dbc.Col([
-                html.Label("Select Patient", className="fw-semibold mb-1"),
                 dcc.Dropdown(id="gap-patient-select", options=options,
-                             placeholder="Choose a patient...", className="mb-3"),
+                             value=restore_patient,
+                             placeholder="Choose a patient...", className="mb-1"),
+            ], width=8),
+            dbc.Col(
                 dbc.Button(
                     [html.I(className="fa-solid fa-stethoscope me-2"), "Identify Care Gaps"],
-                    id="gap-analyze-btn", color="success", disabled=True, className="w-100"
+                    id="gap-analyze-btn", color="primary", size="lg",
+                    disabled=not bool(restore_patient),
+                    className="w-100 h-100",
                 ),
-                html.Small(
-                    "Compares patient record against ADA, ACC/AHA, GOLD, NCCN, KDIGO guidelines.",
-                    className="text-muted d-block mt-2"
-                ),
-                html.Div(id="saved-findings-display"),
-            ], width=4),
+                width=4,
+            ),
+        ], className="mb-3 g-3 align-items-stretch"),
+
+        # ── Row 2: 2-column equal body ───────────────────
+        dbc.Row([
+            # Col 1 — Clinical Record (50%)
             dbc.Col([
-                html.Label("AI Analysis", className="fw-semibold mb-1"),
-                html.Div(id="gap-results",
-                         children=dbc.Alert("Select a patient and click Identify Care Gaps.",
-                                            color="secondary")),
-            ], width=8),
-        ], className="mt-2 g-4"),
+                _col_label("fa-file-waveform text-muted", "Clinical Record"),
+                dcc.Textarea(
+                    id="gap-clinical-record",
+                    style={"width": "100%", "height": "70vh",
+                           "fontSize": "12px", "fontFamily": "monospace",
+                           "resize": "none"},
+                    readOnly=True,
+                    placeholder="Select a patient to load their clinical note...",
+                ),
+            ], width=6),
+
+            # Col 2 — Saved findings (top) + Analysis results (below), single scroll (50%)
+            dbc.Col([
+                html.Div([
+                    _col_label("fa-bookmark text-success", "Saved Care Gaps"),
+                    html.Div(id="saved-findings-display", children=init_saved),
+                    html.Hr(className="my-3"),
+                    _col_label("fa-stethoscope text-success", "Analysis Results"),
+                    html.Div(id="gap-results", children=init_results),
+                ], style={"height": "70vh", "overflowY": "auto",
+                          "paddingRight": "4px"}),
+            ], width=6),
+        ], className="g-3"),
     ], fluid=True)
 
 
@@ -220,18 +309,27 @@ def gap_layout(patients: list[dict]) -> dbc.Container:
     Output("gap-analyze-btn",          "disabled"),
     Output("saved-findings-store",     "data"),
     Output("gap-patient-id-store",     "data", allow_duplicate=True),
+    Output("gap-clinical-record",      "value"),
+    Output("gap-results",              "children", allow_duplicate=True),
     Input("gap-patient-select",        "value"),
     State("catalog-store",             "data"),
     State("schema-store",              "data"),
     prevent_initial_call=True,
 )
 def on_patient_select(patient_id, catalog, schema):
-    if not patient_id:
-        return True, [], ""
-    findings = get_patient_care_gap_findings(
-        patient_id, catalog or CATALOG, schema or SCHEMA
+    default_results = dbc.Alert(
+        [html.I(className="fa-solid fa-stethoscope me-2"),
+         "Click Identify Care Gaps to analyse this patient's clinical record."],
+        color="secondary",
     )
-    return False, findings, patient_id
+    if not patient_id:
+        return True, [], "", "", default_results
+    cat = catalog or CATALOG
+    sch = schema  or SCHEMA
+    findings = get_patient_care_gap_findings(patient_id, cat, sch)
+    record   = get_patient_record(patient_id, cat, sch)
+    clinical = record["clinicalrecord"] if record else ""
+    return False, findings, patient_id, clinical, default_results
 
 
 # Open healthcare modal immediately on button click (no server round-trip needed)
@@ -281,48 +379,7 @@ def run_gaps(n_clicks, patient_id, catalog, schema, saved_findings):
                 [], patient_id, False,
             )
 
-        P = {"HIGH": "danger", "MEDIUM": "warning", "LOW": "info"}
-        cards = []
-        for i, g in enumerate(gaps):
-            already_saved = g.get("rule_id") in saved_rule_ids
-            save_btn = dbc.Button(
-                [html.I(className=f"fa-solid {'fa-circle-check' if already_saved else 'fa-floppy-disk'} me-2"),
-                 "Saved" if already_saved else "Save Finding"],
-                id={"type": "save-gap-btn", "index": i},
-                color="success" if already_saved else "outline-secondary",
-                disabled=already_saved,
-                size="sm", className="mt-2",
-                n_clicks=0,
-            )
-            cards.append(dbc.Card([
-                dbc.CardHeader([
-                    dbc.Badge(g.get("priority", "?"),
-                              color=P.get(g.get("priority", ""), "secondary"), className="me-2"),
-                    html.Strong(g.get("gap_name", "—")),
-                    html.Small(f"  {g.get('condition', '')}", className="text-muted ms-1"),
-                ]),
-                dbc.CardBody([
-                    html.P([html.Strong("Finding: "),   g.get("finding", "—")],           className="mb-1 small"),
-                    html.P([html.Strong("Action: "),    g.get("recommended_action", "—")], className="mb-1 small"),
-                    html.P([html.Strong("Guideline: "), g.get("guideline", "—")],          className="mb-0 small text-muted"),
-                    html.Div([
-                        save_btn,
-                        html.Div(id={"type": "save-gap-result", "index": i}),
-                    ], className="text-end"),
-                ]),
-            ], outline=True, color=P.get(g.get("priority", ""), "secondary"), className="mb-2 shadow-sm"))
-
-        return (
-            html.Div([
-                dbc.Alert(
-                    [html.I(className="fa-solid fa-triangle-exclamation me-2"),
-                     f"{len(gaps)} care gap(s) identified for {patient_id}"],
-                    color="warning", className="mb-3"
-                ),
-                *cards,
-            ]),
-            gaps, patient_id, False,
-        )
+        return _build_gap_cards(gaps, saved_rule_ids), gaps, patient_id, False
     except Exception as e:
         logger.error(f"Care gap analysis: {e}")
         return dbc.Alert(f"Analysis failed: {e}", color="danger"), [], "", False

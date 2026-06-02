@@ -395,15 +395,22 @@ Step 6 (`ka_source_sync`) updates on each Setup page refresh until UPDATED.
 
 ## Stage 6 — ICD-10 Analyzer
 
-**Prerequisites:** Job 1 (patients loaded) + Job 2 (KA volume configured).
+**Prerequisites:** Job 1 (patients loaded) + Job 2 (KA volume attached and PDFs indexed).
+
+> The ICD-10 Analyzer uses the **Knowledge Assistant** backed by the uploaded ICD-10
+> reference PDFs. Results are grounded in the official ICD-10-CM/PCS coding guidelines.
+> A banner warns if PDF indexing is still in progress (step 6 not yet complete).
 
 ### Workflow
 
-1. Select patient → SOAP note loads.
+1. Select patient → SOAP note loads from `patient_records`.
 2. Click **Analyze ICD-10 Codes**.
-3. App calls `FMAPI_ENDPOINT` (Claude Sonnet) with the clinical note.
-4. Model returns ICD-10 code suggestions with confidence levels.
-5. Save codes to `icd10_analysis_results`.
+3. App queries the **Knowledge Assistant** (`KA_ENDPOINT_NAME`) with the SOAP note.
+   The KA performs RAG over the indexed ICD-10 reference PDFs and returns code
+   suggestions grounded in the official coding guidelines.
+4. Response is parsed into a JSON array — each entry has `code`, `type`
+   (Primary / Secondary Diagnosis), `description`, and `confidence` (HIGH/MEDIUM/LOW).
+5. User reviews codes and clicks **Save** — stored to `icd10_analysis_results`.
 
 ---
 
@@ -440,16 +447,6 @@ Applicable gaps: rule_id, gap_name, priority, finding, recommended_action, guide
     ▼
 Saved to care_gap_findings on user click
 ```
-
-### Why VS retrieval works without ICD-10 codes
-
-The query uses raw clinical note text, not ICD-10 codes. A note containing
-`"metformin 1000mg BID, HbA1c 9.2%, no recent ophthalmology visit"` semantically
-matches T2DM care gap rules (HbA1c monitoring, diabetic eye exam) through vector
-similarity — even if no E11.x codes appear in the note.
-
-This means patients with no saved ICD-10 codes get exactly the same retrieval quality
-as patients who have had the ICD-10 Analyzer run.
 
 ### Adding or updating care gap rules
 

@@ -1,6 +1,7 @@
 import dash
-from dash import html, callback, Input, Output, State, ALL, callback_context
+from dash import dcc, html, callback, Input, Output, State, ALL, callback_context
 import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
 
 from config import CATALOG, SCHEMA, logger
 from db import (
@@ -93,12 +94,12 @@ def _patient_accordion_item(p: dict, codes: list[dict], findings: list[dict]) ->
         color     = "danger" if "Primary" in diag_type else "primary"
         icd_badges.append(
             dbc.Badge(c.get("code", ""), color=color, pill=True,
-                      className="font-monospace", style={"fontSize": "10px"})
+                      className="font-monospace", style={"fontSize": "12px", "padding": "5px 10px"})
         )
     if len(codes) > 4:
         icd_badges.append(
             dbc.Badge(f"+{len(codes) - 4}", color="secondary", pill=True,
-                      style={"fontSize": "10px"})
+                      style={"fontSize": "12px", "padding": "5px 10px"})
         )
 
     n_gaps   = len(findings)
@@ -110,11 +111,14 @@ def _patient_accordion_item(p: dict, codes: list[dict], findings: list[dict]) ->
     title = html.Div([
         html.Span(pid, className="fw-bold me-3", style={"minWidth": "70px"}),
         html.Small(f"{gender}, {dob}", className="text-muted me-3",
-                   style={"minWidth": "130px"}),
+                   style={"width": "140px", "flexShrink": "0", "fontSize": "12px"}),
         dbc.Badge(
             f"{n_gaps} gap{'s' if n_gaps != 1 else ''}",
             color=gap_color, text_color=gap_text_color,
-            pill=True, className="me-3", style=gap_style,
+            pill=True,
+            style={**gap_style, "width": "72px", "textAlign": "center",
+                   "fontSize": "12px", "flexShrink": "0",
+                   "padding": "6px 12px", "marginRight": "20px"},
         ),
         html.Div(
             icd_badges if icd_badges
@@ -142,6 +146,52 @@ def _patient_accordion_item(p: dict, codes: list[dict], findings: list[dict]) ->
 
 
 # ---------------------------------------------------------------------------
+# ICD-10 top-5 bar chart
+# ---------------------------------------------------------------------------
+def _icd10_bar_chart(all_icd10: dict):
+    """Horizontal bar chart of the top 5 most-saved ICD-10 codes."""
+    code_counts: dict = {}
+    for codes in all_icd10.values():
+        for c in codes:
+            code = c.get("code", "")
+            if code:
+                code_counts[code] = code_counts.get(code, 0) + 1
+
+    if not code_counts:
+        return html.Div()
+
+    top5   = sorted(code_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    codes  = [t[0] for t in reversed(top5)]   # reversed → highest bar at top
+    counts = [t[1] for t in reversed(top5)]
+
+    fig = go.Figure(go.Bar(
+        x=counts, y=codes, orientation="h",
+        marker={"color": "#4FC3F7", "line": {"width": 0}},
+        text=counts,
+        textposition="outside",
+        textfont={"color": "#D6EAF8", "size": 11},
+        cliponaxis=False,
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 10, "r": 30, "t": 4, "b": 4},
+        height=175,
+        xaxis={"showgrid": False, "showticklabels": False,
+               "zeroline": False, "range": [0, max(counts) * 1.3]},
+        yaxis={"tickfont": {"color": "#D6EAF8", "size": 11, "family": "monospace"},
+               "showgrid": False, "automargin": True},
+        showlegend=False,
+    )
+    return html.Div([
+        html.Small("Top 5 Codes", className="text-muted",
+                   style={"fontSize": "10px", "letterSpacing": "0.4px"}),
+        dcc.Graph(figure=fig, config={"displayModeBar": False},
+                  style={"height": "175px"}),
+    ], className="mt-1")
+
+
+# ---------------------------------------------------------------------------
 # Overview builder
 # ---------------------------------------------------------------------------
 def _build_overview(patients: list[dict], all_findings: dict, all_icd10: dict) -> html.Div:
@@ -153,12 +203,15 @@ def _build_overview(patients: list[dict], all_findings: dict, all_icd10: dict) -
             color="warning", className="mt-3",
         ), fluid=True)
 
-    total_icd10   = sum(len(v) for v in all_icd10.values())
-    total_gaps    = sum(len(v) for v in all_findings.values())
-    high_gaps     = sum(1 for v in all_findings.values()
-                        for f in v if f.get("priority") == "HIGH")
-    missing_icd10 = sum(1 for p in patients
-                        if not all_icd10.get(p["patient_id"]))
+    total_icd10        = sum(len(v) for v in all_icd10.values())
+    missing_icd10      = sum(1 for p in patients if not all_icd10.get(p["patient_id"]))
+    patients_with_gaps = sum(1 for v in all_findings.values() if v)
+    patients_high_gaps = sum(1 for v in all_findings.values()
+                             if any(f.get("priority") == "HIGH" for f in v))
+    high_gaps          = sum(1 for v in all_findings.values()
+                             for f in v if f.get("priority") == "HIGH")
+    medium_gaps        = sum(1 for v in all_findings.values()
+                             for f in v if f.get("priority") == "MEDIUM")
 
     def _stat(value, label, color, tall=False):
         return dbc.Card(dbc.CardBody([
@@ -168,18 +221,55 @@ def _build_overview(patients: list[dict], all_findings: dict, all_icd10: dict) -
            style={"minHeight": "90px"} if tall else {}),
         className="shadow-sm h-100")
 
+    def _section(title, icon, accent, bg, rows_content):
+        """Styled section card with coloured header band and tinted background."""
+        return html.Div([
+            # Section header
+            html.Div([
+                html.I(className=f"fa-solid {icon} me-2 fa-sm",
+                       style={"color": accent}),
+                html.Span(title, className="fw-bold",
+                          style={"fontSize": "13px", "color": accent,
+                                 "letterSpacing": "0.2px"}),
+            ], className="px-2 py-2",
+               style={"borderBottom": f"1px solid {accent}33",
+                      "background": f"{accent}14",
+                      "borderRadius": "8px 8px 0 0"}),
+            # Content rows
+            html.Div(rows_content, className="p-2"),
+        ], className="rounded mb-3",
+           style={"background": bg,
+                  "border": f"1px solid {accent}30",
+                  "borderRadius": "8px"})
+
     stats_col = html.Div([
+        # ── Total Patients ──────────────────────────────
         dbc.Row([
-            dbc.Col(_stat(len(patients), "Patients", "primary"), className="mb-2"),
+            dbc.Col(_stat(len(patients), "Patients", "primary"), className="mb-3"),
         ]),
-        dbc.Row([
-            dbc.Col(_stat(total_icd10,   "ICD-10 Codes",   "info",    tall=True), width=6),
-            dbc.Col(_stat(missing_icd10, "Missing ICD-10", "warning", tall=True), width=6),
-        ], className="mb-2 g-2"),
-        dbc.Row([
-            dbc.Col(_stat(total_gaps, "Care Gaps",          "secondary", tall=True), width=6),
-            dbc.Col(_stat(high_gaps,  "High Priority Gaps", "danger",    tall=True), width=6),
-        ], className="g-2"),
+
+        # ── Care Gap Stats ──────────────────────────────
+        _section("Care Gap Stats", "fa-stethoscope", "#4DD0E1",
+                 "rgba(77,208,225,0.05)", [
+            dbc.Row([
+                dbc.Col(_stat(patients_with_gaps, "Pts with Gaps",    "secondary", tall=True), width=6),
+                dbc.Col(_stat(patients_high_gaps, "Pts High Priority", "danger",   tall=True), width=6),
+            ], className="mb-2 g-2"),
+            dbc.Row([
+                dbc.Col(_stat(high_gaps,   "High Gaps",   "danger",  tall=True), width=6),
+                dbc.Col(_stat(medium_gaps, "Medium Gaps", "warning", tall=True), width=6),
+            ], className="g-2"),
+        ]),
+
+        # ── ICD-10 Stats ────────────────────────────────
+        _section("ICD-10 Stats", "fa-file-medical", "#4FC3F7",
+                 "rgba(79,195,247,0.05)", [
+            dbc.Row([
+                dbc.Col(_stat(total_icd10,   "Total Codes",    "info",    tall=True), width=6),
+                dbc.Col(_stat(missing_icd10, "Missing ICD-10", "warning", tall=True), width=6),
+            ], className="g-2 mb-2"),
+            _icd10_bar_chart(all_icd10),
+        ]),
     ])
 
     accordion = dbc.Accordion(
@@ -232,12 +322,15 @@ def home_shell() -> html.Div:
     Output("home-patients-store",     "data"),
     Output("home-all-findings-store", "data"),
     Output("home-all-icd10-store",    "data"),
-    Input("home-overview-refresh-btn","n_clicks"),
-    Input("catalog-store",            "data"),
-    Input("schema-store",             "data"),
-    prevent_initial_call=False,
+    Input("home-overview-refresh-btn", "n_clicks"),
+    Input("active-tab-store",          "data"),
+    State("catalog-store",             "data"),
+    State("schema-store",              "data"),
+    prevent_initial_call=True,
 )
-def refresh_overview(n_clicks, catalog, schema):
+def refresh_overview(n_clicks, active_tab, catalog, schema):
+    if active_tab and active_tab != "tab-home":
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     cat = catalog or CATALOG
     sch = schema  or SCHEMA
     try:

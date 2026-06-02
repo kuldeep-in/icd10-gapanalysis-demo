@@ -9,6 +9,281 @@ from config import CATALOG, SCHEMA, BRAND_ORANGE
 # ---------------------------------------------------------------------------
 # App init
 # ---------------------------------------------------------------------------
+_HC_CSS = """
+/* ═══════════════════════════════════════════════════════
+   Clinical AI Demo — Professional Dark Healthcare Theme
+═══════════════════════════════════════════════════════ */
+:root {
+  --hc-page-bg:    #091420;
+  --hc-surface:    #0D1F30;
+  --hc-surface-2:  #122840;
+  --hc-border:     #1A3248;
+  --hc-primary:    #4FC3F7;
+  --hc-primary-dk: #0288D1;
+  --hc-primary-bg: #0A1E30;
+  --hc-teal:       #4DD0E1;
+  --hc-teal-dk:    #00ACC1;
+  --hc-teal-bg:    #091C24;
+  --hc-green:      #69F0AE;
+  --hc-green-dk:   #00C853;
+  --hc-green-bg:   #061A10;
+  --hc-amber:      #FFCA28;
+  --hc-amber-bg:   #1A1200;
+  --hc-red:        #FF5252;
+  --hc-red-bg:     #1A0808;
+  --hc-text:       #D6EAF8;
+  --hc-muted:      #6E93AD;
+  --hc-shadow:     0 4px 20px rgba(0,0,0,0.5);
+  --hc-shadow-sm:  0 2px 10px rgba(0,0,0,0.35);
+  --hc-radius:     10px;
+}
+/* ── Base ───────────────────────────────── */
+body, html {
+  background-color: var(--hc-page-bg) !important;
+  color: var(--hc-text) !important;
+  font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+/* ── Navbar ─────────────────────────────── */
+.navbar {
+  background: linear-gradient(135deg, #030D18 0%, #061420 60%, #091E2E 100%) !important;
+  box-shadow: 0 1px 0 var(--hc-border), 0 4px 20px rgba(0,0,0,0.6) !important;
+  border-bottom: 1px solid var(--hc-border) !important;
+  padding-top: 0.6rem !important;
+  padding-bottom: 0.6rem !important;
+}
+.navbar .navbar-brand, .navbar button, .navbar span { color: rgba(255,255,255,0.9) !important; }
+/* ── Nav buttons — active/inactive ──────── */
+.nav-btn-active, .nav-btn-inactive {
+  border: none !important;
+  text-decoration: none !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  padding: 6px 13px !important;
+  border-radius: 8px !important;
+  transition: background 0.18s ease, opacity 0.18s ease;
+  font-size: 0.875rem;
+  color: #fff !important;
+}
+.nav-btn-active {
+  background: rgba(79,195,247,0.18) !important;
+  border-bottom: 2px solid var(--hc-primary) !important;
+  border-radius: 8px 8px 0 0 !important;
+  opacity: 1 !important;
+  font-weight: 600 !important;
+  color: var(--hc-primary) !important;
+}
+.nav-btn-active .fa-solid { color: var(--hc-primary) !important; }
+.nav-btn-inactive {
+  background: transparent !important;
+  border-bottom: 2px solid transparent !important;
+  border-radius: 8px 8px 0 0 !important;
+  opacity: 0.7 !important;
+}
+.nav-btn-inactive:hover {
+  background: rgba(255,255,255,0.08) !important;
+  opacity: 1 !important;
+}
+/* ── Cards ──────────────────────────────── */
+.card {
+  background: var(--hc-surface) !important;
+  border: 1px solid var(--hc-border) !important;
+  border-radius: var(--hc-radius) !important;
+  box-shadow: var(--hc-shadow-sm) !important;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.card:hover { box-shadow: var(--hc-shadow) !important; border-color: #234060 !important; }
+.card-header {
+  background: var(--hc-surface-2) !important;
+  border-bottom: 1px solid var(--hc-border) !important;
+  border-radius: var(--hc-radius) var(--hc-radius) 0 0 !important;
+  color: var(--hc-text) !important;
+}
+.card-body { color: var(--hc-text) !important; }
+/* ── Buttons ────────────────────────────── */
+.btn { border-radius: 6px !important; font-weight: 500 !important; }
+.btn-primary {
+  background: var(--hc-primary-dk) !important; border-color: var(--hc-primary-dk) !important;
+  color: #fff !important;
+}
+.btn-primary:hover {
+  background: #039BE5 !important; border-color: #039BE5 !important;
+  box-shadow: 0 0 16px rgba(79,195,247,0.4) !important;
+}
+.btn-success {
+  background: var(--hc-teal-dk) !important; border-color: var(--hc-teal-dk) !important;
+  color: #fff !important;
+}
+.btn-success:hover {
+  background: #00BCD4 !important; border-color: #00BCD4 !important;
+  box-shadow: 0 0 16px rgba(77,208,225,0.4) !important;
+}
+.btn-outline-secondary {
+  border-color: var(--hc-border) !important; color: var(--hc-muted) !important;
+  background: transparent !important;
+}
+.btn-outline-secondary:hover {
+  background: var(--hc-surface-2) !important; color: var(--hc-text) !important;
+  border-color: var(--hc-primary) !important;
+}
+.btn-danger { background: #B71C1C !important; border-color: #B71C1C !important; }
+.btn-link   { color: var(--hc-primary) !important; }
+/* ── Tables ─────────────────────────────── */
+.table { color: var(--hc-text) !important; }
+.table thead th, .table-dark th {
+  background: var(--hc-surface-2) !important;
+  color: var(--hc-primary) !important;
+  font-weight: 600 !important;
+  border-color: var(--hc-border) !important;
+  letter-spacing: 0.3px !important;
+}
+.table tbody tr { border-color: var(--hc-border) !important; }
+.table tbody tr td { border-color: var(--hc-border) !important; color: var(--hc-text) !important; }
+.table tbody tr:hover td { background-color: var(--hc-primary-bg) !important; }
+/* ── Accordion ──────────────────────────── */
+.accordion-item {
+  background: var(--hc-surface) !important;
+  border: 1px solid var(--hc-border) !important;
+  border-radius: 8px !important; margin-bottom: 5px !important; overflow: hidden;
+}
+.accordion-button {
+  background: var(--hc-surface) !important;
+  color: var(--hc-text) !important; font-weight: 500 !important;
+}
+.accordion-button:not(.collapsed) {
+  background: var(--hc-primary-bg) !important;
+  color: var(--hc-primary) !important;
+  border-bottom: 1px solid var(--hc-border);
+  box-shadow: none !important;
+}
+.accordion-button::after { filter: invert(1) brightness(0.7); }
+.accordion-body { background: var(--hc-surface) !important; color: var(--hc-text) !important; }
+/* ── Alerts ─────────────────────────────── */
+.alert { border-radius: 8px !important; font-size: 0.875rem !important; }
+.alert-warning  { background: var(--hc-amber-bg) !important; border-color: #5A3E00 !important; color: var(--hc-amber) !important; }
+.alert-success  { background: var(--hc-green-bg) !important; border-color: #1A4A2A !important; color: var(--hc-green) !important; }
+.alert-info     { background: var(--hc-primary-bg) !important; border-color: #1A3A5A !important; color: var(--hc-primary) !important; }
+.alert-danger   { background: var(--hc-red-bg) !important; border-color: #4A1010 !important; color: var(--hc-red) !important; }
+.alert-secondary{ background: var(--hc-surface-2) !important; border-color: var(--hc-border) !important; color: var(--hc-muted) !important; }
+/* ── Inputs ─────────────────────────────── */
+.form-control, .form-select, textarea {
+  background: var(--hc-surface-2) !important;
+  border: 1px solid var(--hc-border) !important;
+  border-radius: 6px !important;
+  color: var(--hc-text) !important;
+}
+.form-control:focus, .form-select:focus, textarea:focus {
+  border-color: var(--hc-primary) !important;
+  box-shadow: 0 0 0 3px rgba(79,195,247,0.2) !important;
+  background: var(--hc-surface-2) !important;
+  color: var(--hc-text) !important;
+}
+.form-control::placeholder, textarea::placeholder { color: var(--hc-muted) !important; }
+/* ── Dropdowns (Dash) ───────────────────── */
+.Select-control, .Select-menu-outer {
+  background: var(--hc-surface-2) !important;
+  border-color: var(--hc-border) !important;
+  color: var(--hc-text) !important;
+}
+.Select-value-label, .Select-placeholder { color: var(--hc-text) !important; }
+.Select-option { background: var(--hc-surface-2) !important; color: var(--hc-text) !important; }
+.Select-option.is-focused { background: var(--hc-primary-bg) !important; }
+/* ── Modals ─────────────────────────────── */
+.modal-content {
+  background: var(--hc-surface) !important;
+  border: 1px solid var(--hc-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.7) !important;
+}
+.modal-header {
+  background: var(--hc-surface-2) !important;
+  border-bottom: 1px solid var(--hc-border) !important;
+  border-radius: 12px 12px 0 0 !important;
+  color: var(--hc-text) !important;
+}
+.modal-body    { background: var(--hc-surface) !important; color: var(--hc-text) !important; }
+.modal-footer  { background: var(--hc-surface) !important; border-top: 1px solid var(--hc-border) !important; }
+/* ── Progress ───────────────────────────── */
+.progress { border-radius: 6px !important; background: var(--hc-surface-2) !important; }
+.progress-bar { border-radius: 6px !important; }
+.progress-bar.bg-primary { background: var(--hc-primary-dk) !important; }
+.progress-bar.bg-success { background: var(--hc-teal-dk) !important; }
+.progress-bar.bg-warning { background: #FF8F00 !important; }
+/* ── Toast ──────────────────────────────── */
+.toast {
+  background: var(--hc-surface) !important;
+  border: 1px solid var(--hc-border) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6) !important;
+  color: var(--hc-text) !important;
+}
+.toast-header {
+  background: var(--hc-surface-2) !important;
+  color: var(--hc-primary) !important;
+  border-bottom: 1px solid var(--hc-border) !important;
+  border-radius: 10px 10px 0 0 !important;
+}
+/* ── Badges ─────────────────────────────── */
+.badge { font-weight: 600 !important; }
+.badge.bg-light { background: var(--hc-surface-2) !important; color: var(--hc-text) !important; }
+/* ── Text colors ────────────────────────── */
+.text-muted, small.text-muted { color: var(--hc-muted) !important; }
+.text-dark { color: var(--hc-text) !important; }
+.fw-bold, .fw-semibold { color: var(--hc-text) !important; }
+h5.fw-bold { color: var(--hc-primary) !important; }
+/* ── Labels / small text ────────────────── */
+label, .form-label, .small { color: var(--hc-text) !important; }
+code { background: var(--hc-surface-2) !important; color: var(--hc-primary) !important; border-radius: 4px !important; padding: 1px 5px !important; }
+/* ── Stat tiles ─────────────────────────── */
+.card-body h4 { font-size: 2.1rem !important; font-weight: 700 !important; line-height: 1.1 !important; }
+.text-primary { color: var(--hc-primary) !important; }
+.text-info    { color: var(--hc-teal) !important; }
+.text-success { color: var(--hc-green) !important; }
+.text-danger  { color: var(--hc-red) !important; }
+.text-warning { color: var(--hc-amber) !important; }
+.text-secondary { color: var(--hc-muted) !important; }
+/* ── Border colours ─────────────────────── */
+.border-bottom, .border-top, .border-start, .border-end, .border { border-color: var(--hc-border) !important; }
+/* ── Scrollbar ──────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--hc-page-bg); }
+::-webkit-scrollbar-thumb { background: #1E3A52; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--hc-primary-dk); }
+/* ── HR ─────────────────────────────────── */
+hr { border-color: var(--hc-border) !important; opacity: 0.6; }
+/* ── Shadow util ────────────────────────── */
+.shadow-sm  { box-shadow: var(--hc-shadow-sm) !important; }
+.h-100      { height: 100% !important; }
+/* ── Navbar glow on active ──────────────── */
+.navbar button.active, .navbar button:active { color: var(--hc-primary) !important; }
+/* ── ICD-10 results table — dark theme contrast ── */
+.table-sm td, .table-sm th {
+  background-color: transparent !important;
+  color: var(--hc-text) !important;
+  border-color: var(--hc-border) !important;
+}
+.table-sm td code {
+  background: var(--hc-surface-2) !important;
+  color: var(--hc-primary) !important;
+  border-radius: 4px !important;
+  padding: 2px 6px !important;
+  font-weight: 700 !important;
+}
+.table-sm small, .table-sm .small {
+  color: var(--hc-text) !important;
+}
+/* ── Setup page — inline style overrides ── */
+.hc-prereq-bg {
+  background: var(--hc-surface-2) !important;
+  border: 1px solid var(--hc-border) !important;
+}
+.hc-prereq-border { border-color: var(--hc-border) !important; }
+.hc-card-header-config {
+  background: var(--hc-surface-2) !important;
+  border-bottom: 2px solid var(--hc-muted) !important;
+}
+"""
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[
@@ -17,6 +292,25 @@ app = dash.Dash(
     ],
     suppress_callback_exceptions=True,
 )
+app.index_string = f"""<!DOCTYPE html>
+<html>
+  <head>
+    {{%metas%}}
+    <title>Clinical AI Demo</title>
+    {{%favicon%}}
+    {{%css%}}
+    <style>{_HC_CSS}</style>
+  </head>
+  <body>
+    {{%app_entry%}}
+    <footer>
+      {{%config%}}
+      {{%scripts%}}
+      {{%renderer%}}
+    </footer>
+  </body>
+</html>
+"""
 server = app.server
 
 import tab_home      # noqa: E402
@@ -30,42 +324,39 @@ import tab_setup     # noqa: E402
 NAVBAR = dbc.Navbar(
     dbc.Container([
         dbc.NavbarBrand(
-            [html.I(className="fa-solid fa-heart-pulse me-2", style={"color": BRAND_ORANGE}),
-             "Clinical AI Demo"],
-            className="fw-bold fs-5"
+            [html.I(className="fa-solid fa-heart-pulse me-2",
+                    style={"color": "#4FC3F7"}),   # bright clinical blue on dark navbar
+             html.Span("Clinical AI Demo", style={"letterSpacing": "-0.3px"})],
+            className="fw-bold fs-5 text-white"
         ),
         html.Div([
             html.Button(
-                [html.I(className="fa-solid fa-house fa-lg me-1"),
-                 html.Span("Home", style={"fontSize": "13px"})],
+                [html.I(className="fa-solid fa-house fa-xl"),
+                 html.Span("Home")],
                 id="nav-home-btn", n_clicks=0,
-                className="btn btn-link text-white text-decoration-none d-flex align-items-center gap-1 p-0",
-                style={"opacity": "0.8", "background": "none", "border": "none"},
+                className="nav-btn-active",   # home active by default
             ),
             html.Button(
-                [html.I(className="fa-solid fa-file-medical fa-lg me-1"),
-                 html.Span("ICD-10", style={"fontSize": "13px"})],
+                [html.I(className="fa-solid fa-file-medical fa-xl"),
+                 html.Span("ICD-10")],
                 id="nav-icd10-btn", n_clicks=0,
-                className="btn btn-link text-white text-decoration-none d-flex align-items-center gap-1 p-0",
-                style={"opacity": "0.8", "background": "none", "border": "none"},
+                className="nav-btn-inactive",
             ),
             html.Button(
-                [html.I(className="fa-solid fa-stethoscope fa-lg me-1"),
-                 html.Span("Care Gap", style={"fontSize": "13px"})],
+                [html.I(className="fa-solid fa-stethoscope fa-xl"),
+                 html.Span("Care Gap")],
                 id="nav-caregap-btn", n_clicks=0,
-                className="btn btn-link text-white text-decoration-none d-flex align-items-center gap-1 p-0",
-                style={"opacity": "0.8", "background": "none", "border": "none"},
+                className="nav-btn-inactive",
             ),
             html.Button(
-                [html.I(id="navbar-setup-icon", className="fa-solid fa-gear fa-lg me-1"),
-                 html.Span("Setup", style={"fontSize": "13px"})],
+                [html.I(id="navbar-setup-icon", className="fa-solid fa-gear fa-xl"),
+                 html.Span("Setup")],
                 id="nav-setup-btn", n_clicks=0,
-                className="btn btn-link text-white text-decoration-none d-flex align-items-center gap-1 p-0 pe-3",
-                style={"opacity": "0.8", "background": "none", "border": "none"},
+                className="nav-btn-inactive",
             ),
-        ], className="ms-auto d-flex align-items-center gap-3"),
+        ], className="ms-auto d-flex align-items-center gap-1"),
     ], fluid=True),
-    color="dark", dark=True, className="mb-0 shadow-sm"
+    dark=True, className="mb-0"
 )
 
 # ---------------------------------------------------------------------------
@@ -189,10 +480,8 @@ def nav_to_demo(n):
 )
 def nav_to_tab(icd10_n, caregap_n):
     triggered = callback_context.triggered_id
-    if triggered == "nav-icd10-btn" and icd10_n:
-        return "demo", "tab-icd10"
-    if triggered == "nav-caregap-btn" and caregap_n:
-        return "demo", "tab-caregap"
+    if triggered == "nav-icd10-btn"   and icd10_n:   return "demo", "tab-icd10"
+    if triggered == "nav-caregap-btn" and caregap_n: return "demo", "tab-caregap"
     return dash.no_update, dash.no_update
 
 
@@ -212,10 +501,10 @@ app.clientside_callback(
     }
     """,
     Output("url-updater",    "children"),
-    Input("nav-setup-btn",   "n_clicks"),
-    Input("nav-home-btn",    "n_clicks"),
-    Input("nav-icd10-btn",   "n_clicks"),
-    Input("nav-caregap-btn", "n_clicks"),
+    Input("nav-setup-btn",    "n_clicks"),
+    Input("nav-home-btn",     "n_clicks"),
+    Input("nav-icd10-btn",    "n_clicks"),
+    Input("nav-caregap-btn",  "n_clicks"),
     prevent_initial_call=True,
 )
 
@@ -240,8 +529,28 @@ def route(page):
 )
 def update_navbar_icon(all_done):
     if all_done:
-        return "fa-solid fa-circle-check me-1 text-success"
-    return "fa-solid fa-gear me-1"
+        return "fa-solid fa-circle-check fa-xl text-success"
+    return "fa-solid fa-gear fa-xl"
+
+
+@callback(
+    Output("nav-home-btn",    "className"),
+    Output("nav-icd10-btn",   "className"),
+    Output("nav-caregap-btn", "className"),
+    Output("nav-setup-btn",   "className"),
+    Input("active-tab-store", "data"),
+    Input("active-page-store","data"),
+)
+def update_nav_active(active_tab, active_page):
+    a = "nav-btn-active"
+    i = "nav-btn-inactive"
+    on_setup = active_page == "setup"
+    return (
+        a if (active_tab == "tab-home"    and not on_setup) else i,
+        a if (active_tab == "tab-icd10"   and not on_setup) else i,
+        a if (active_tab == "tab-caregap" and not on_setup) else i,
+        a if on_setup else i,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,13 +622,23 @@ def _load_patients_direct(catalog, schema):
 @callback(
     Output("tab-content",       "children"),
     Input("active-tab-store",   "data"),
-    State("patient-store",      "data"),
-    State("ka-endpoint-store",  "data"),
-    State("all-done-store",     "data"),
-    State("catalog-store",      "data"),
-    State("schema-store",       "data"),
+    State("patient-store",           "data"),
+    State("ka-endpoint-store",       "data"),
+    State("all-done-store",          "data"),
+    State("catalog-store",           "data"),
+    State("schema-store",            "data"),
+    # ICD-10 persisted state
+    State("icd10-patient-store",     "data"),
+    State("icd10-codes-store",       "data"),
+    State("icd10-saved-codes-store", "data"),
+    # Care Gap persisted state
+    State("gap-patient-id-store",    "data"),
+    State("gap-results-store",       "data"),
+    State("saved-findings-store",    "data"),
 )
-def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema):
+def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema,
+               icd10_patient, icd10_codes, icd10_saved,
+               gap_patient, gap_results, gap_saved_findings):
     if active_tab == "tab-home":
         return tab_home.home_shell()
 
@@ -332,7 +651,10 @@ def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema):
                  "Click the ", html.Strong("⚙ Setup"), " icon in the navbar and run the Data Setup job."],
                 color="warning", className="mt-3"
             ), fluid=True)
-        return tab_icd10.icd10_layout(pts)
+        return tab_icd10.icd10_layout(pts,
+            restore_patient=icd10_patient,
+            restore_codes=icd10_codes,
+            restore_saved=icd10_saved)
 
     if active_tab == "tab-caregap":
         pts = patients or _load_patients_direct(catalog, schema)
@@ -343,7 +665,10 @@ def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema):
                  "Click the ", html.Strong("⚙ Setup"), " icon in the navbar and run the Data Setup job."],
                 color="warning", className="mt-3"
             ), fluid=True)
-        return tab_caregap.gap_layout(pts)
+        return tab_caregap.gap_layout(pts,
+            restore_patient=gap_patient,
+            restore_gaps=gap_results,
+            restore_saved_findings=gap_saved_findings)
 
     return html.Div()
 

@@ -221,8 +221,8 @@ def _prereq_section(prereqs: list[dict]) -> html.Div:
             html.Span("Prerequisites", className="small fw-semibold text-muted text-uppercase",
                       style={"letterSpacing": "0.5px", "fontSize": "11px"}),
         ], className="mb-2"),
-        html.Div(rows, className="ps-2 border-start border-2", style={"borderColor": "#dee2e6"}),
-    ], className="mb-3 p-2 rounded", style={"background": "#f8f9fa", "border": "1px solid #e9ecef"})
+        html.Div(rows, className="ps-2 border-start border-2 hc-prereq-border"),
+    ], className="mb-3 p-2 rounded hc-prereq-bg")
 
 
 def _step_accordion_item(step: dict) -> dbc.AccordionItem:
@@ -367,7 +367,7 @@ def _settings_column() -> dbc.Col:
         dbc.CardHeader([
             html.I(className="fa-solid fa-gear me-2"),
             html.Strong("Configuration", style={"fontSize": "14px"}),
-        ], style={"background": "#f8f9fa", "borderBottom": "2px solid #6c757d"}),
+        ], className="hc-card-header-config"),
         dbc.CardBody([
             _section("Unity Catalog"),
             _cfg_row("Catalog", CATALOG or "—", "fa-layer-group"),

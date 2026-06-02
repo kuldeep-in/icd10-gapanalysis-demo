@@ -41,8 +41,7 @@ graph TB
     end
 
     U --> APP
-    ICD -->|"note → codes + citations"| KA
-    ICD -->|"structured coding"| FMAPI
+    ICD -->|"note → codes\n(RAG over PDFs)"| KA
     GAP -->|"semantic retrieval\ntop-15 relevant rules"| VS
     GAP -->|"rules + note → gaps"| FMAPI
     APP -->|"Delta queries"| WH
@@ -181,9 +180,15 @@ icd10-gapanalysis-demo/
 
 1. User selects a patient — SOAP note loads from `patient_records`
 2. Clicks **Analyze ICD-10 Codes**
-3. App sends the note to **Claude Sonnet** (FMAPI) which returns a structured JSON array
-   of ICD-10 codes with type (Primary/Secondary) and confidence (HIGH/MEDIUM/LOW)
-4. User reviews codes and clicks **Save** — stored to `icd10_analysis_results`
+3. App queries the **Knowledge Assistant** (`KA_ENDPOINT_NAME`) with the clinical note.
+   The KA performs RAG over the indexed ICD-10 reference PDFs, grounding suggestions
+   in the official ICD-10-CM/PCS coding guidelines
+4. Response is parsed into a JSON array — each entry has `code`, `type`
+   (Primary/Secondary Diagnosis), `description`, and `confidence` (HIGH/MEDIUM/LOW)
+5. User reviews codes and clicks **Save** — stored to `icd10_analysis_results`
+
+> **Requires Job 2** — the ICD-10 reference PDFs must be attached and indexed in the
+> Knowledge Assistant. A banner appears if indexing is still in progress.
 
 ---
 

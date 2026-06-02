@@ -92,8 +92,8 @@ BOOTSTRAP_STEPS = [
 ]
 
 GROUP_META = {
-    1: {"label": "Job 1 — Data Setup",                "icon": "fa-database", "border": "#0d6efd", "bg": "#f0f4ff"},
-    2: {"label": "Job 2 — Knowledge Assistant Setup", "icon": "fa-robot",    "border": "#198754", "bg": "#f0fff4"},
+    1: {"label": "Job 1 — Data Setup",                "icon": "fa-database", "border": "#4FC3F7", "bg": "var(--hc-primary-bg, #0A1E30)"},
+    2: {"label": "Job 2 — Knowledge Assistant Setup", "icon": "fa-robot",    "border": "#4DD0E1", "bg": "var(--hc-teal-bg, #091C24)"},
 }
 
 STATUS_META = {
