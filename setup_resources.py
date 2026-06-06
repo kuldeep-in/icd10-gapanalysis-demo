@@ -75,25 +75,31 @@ def _api_post(path: str, body: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Warehouse
 # ---------------------------------------------------------------------------
-def resolve_warehouse(warehouse_id: str) -> str:
-    if warehouse_id and warehouse_id not in ("<your-warehouse-id>", ""):
-        try:
-            data = _api_get(f"/api/2.0/sql/warehouses/{warehouse_id}")
-            _info(f"✔ Warehouse validated: {data.get('name', '')} ({warehouse_id})")
-            return warehouse_id
-        except Exception:
-            _info(f"✗ Warehouse '{warehouse_id}' not found — creating a new one")
+def resolve_warehouse(warehouse_name: str) -> str:
+    if not warehouse_name:
+        print("ERROR: warehouse_name is not set in databricks.yml. Cannot deploy.", file=sys.stderr)
+        sys.exit(1)
 
-    _info("Creating serverless SQL warehouse...")
+    _info(f"Looking up warehouse by name: '{warehouse_name}'")
+    warehouses = _api_get("/api/2.0/sql/warehouses").get("warehouses", [])
+    match = next((w for w in warehouses if w.get("name") == warehouse_name), None)
+
+    if match:
+        _info(f"✔ Warehouse found: {match['name']} ({match['id']})")
+        return match["id"]
+
+    _info(f"Warehouse '{warehouse_name}' not found — creating")
     data = _api_post("/api/2.0/sql/warehouses", {
-        "name":                      "icd10-gap-demo-warehouse",
+        "name":                      warehouse_name,
         "cluster_size":              "Small",
         "warehouse_type":            "PRO",
         "enable_serverless_compute": True,
         "auto_stop_mins":            30,
+        "max_num_clusters":          1,
     })
     wh_id = data.get("id", "")
     _info(f"✔ Warehouse created: {wh_id}")
+    return wh_id
     return wh_id
 
 
@@ -116,7 +122,9 @@ def _create_ka(display_name: str) -> str:
             "excerpt from the source document that supports it. "
             "Rank results by relevance to the clinical text provided. "
             "If a code cannot be confidently matched to the uploaded documents, "
-            "state that explicitly rather than guessing."
+            "state that explicitly rather than guessing. "
+            "Always return the result as JSON array with a concrete example of the exact "
+            "format expected (code, type, description, confidence)."
         ),
     })
 
@@ -245,7 +253,7 @@ def main() -> None:
     parser.add_argument("--profile",          default="DEFAULT",           help="Databricks CLI profile")
     parser.add_argument("--catalog",          required=True,               help="Unity Catalog name")
     parser.add_argument("--schema",           required=True,               help="Schema name")
-    parser.add_argument("--warehouse-id",     default="",                  help="SQL warehouse ID (created if empty)")
+    parser.add_argument("--warehouse-name",   default="",                  help="SQL warehouse name (created if not found; error if empty)")
     parser.add_argument("--ka-display-name",  default="",                  help="KA display name (created if not found)")
     parser.add_argument("--vs-endpoint-name", default="rag_pdf_vs_endpoint", help="VS endpoint name (created if not found)")
     args = parser.parse_args()
@@ -255,7 +263,7 @@ def main() -> None:
     print("Resolving infrastructure resources...", file=sys.stderr)
 
     print("\n[1/3] SQL Warehouse", file=sys.stderr)
-    warehouse_id = resolve_warehouse(args.warehouse_id)
+    warehouse_id = resolve_warehouse(args.warehouse_name)
 
     print("\n[2/3] Knowledge Assistant Endpoint", file=sys.stderr)
     ka_endpoint, ka_name = resolve_ka_endpoint(args.ka_display_name)

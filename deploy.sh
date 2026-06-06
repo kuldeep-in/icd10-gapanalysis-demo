@@ -1,39 +1,46 @@
 #!/usr/bin/env bash
 # deploy.sh — Full deployment for icd10-gapanalysis-demo
 #
+# Git is the single source of truth for all files.
 # databricks.yml is the single source of truth for all config variables.
-# This script reads defaults from databricks.yml — no values are hardcoded here.
-# Command-line flags override those defaults when provided.
-# The workspace app/ path is derived automatically from databricks.yml via
-# 'databricks bundle validate' — no --app-path flag required.
 #
-# Sequence:
+# Two-phase deployment:
+#   Phase 1 — Bootstrap
 #   1. Read variable defaults from databricks.yml
-#   2. Derive workspace app path from bundle configuration
+#   2. Derive workspace file path from bundle configuration
 #   3. setup_resources.py  — resolve / create SQL warehouse + KA + VS endpoints
-#   4. Generate app.yaml   — write all env vars from resolved values
-#   5. Deploy app          — establishes app service principal
-#   6. Grant permissions   — warehouse, KA, VS endpoints to app SP
-#   7. Sync setup notebooks — pull from workspace so bundle manages them correctly
-#   8. Bundle deploy        — creates Jobs with all vars from single source
+#   4. Generate app.yaml   — written to app/app.yaml (synced to workspace by Step 5)
+#   5. File sync           — databricks sync --full (files only, no job creation)
+#   6. Deploy app          — create if needed, wait for ACTIVE, then apps deploy
+#
+#   Phase 2 — Finalise
+#   7. Read app SP + grant permissions (warehouse · KA · VS endpoint)
+#   8. DAB deploy          — creates jobs WITH app SP permissions from workflows.yml
+#
+# Job names: [dev <username>] <data_setup_job_name | ai_setup_job_name>
 #
 # Usage:
-#   ./deploy.sh [overrides]
-#
-# Overrides (all optional — defaults come from databricks.yml):
-#   --profile           Databricks CLI profile
-#   --catalog           Unity Catalog name
-#   --schema            Schema name
-#   --warehouse-id      SQL warehouse ID         (auto-created if omitted)
-#   --ka-display-name   KA display name          (created if not found)
+#   ./deploy.sh [--profile <profile>] [--catalog <name>] [--schema <name>]
+#               [--warehouse-name <name>] [--ka-display-name <name>]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_START=$(date +%s)
+
+# ── Logging helpers ───────────────────────────────────────────────────────────
+_log()     { echo "  $*"; }
+_ok()      { echo "  ✔ $*"; }
+_section() { echo ""; echo "──────────────────────────────────────────────────"; echo "  $*"; echo "──────────────────────────────────────────────────"; }
+_elapsed() { echo "  ⏱  $(( $(date +%s) - DEPLOY_START ))s elapsed"; }
 
 # ── Step 1: Read all variable defaults from databricks.yml ───────────────────
-# databricks.yml is the single source of truth — no defaults hardcoded here.
-echo "Reading config from databricks.yml..."
+echo ""
+echo "╔══════════════════════════════════════════════════╗"
+echo "║   ICD-10 Gap Analysis Demo — Deploying...        ║"
+echo "╚══════════════════════════════════════════════════╝"
+echo ""
+_log "Reading config from databricks.yml..."
 _py=$(mktemp /tmp/yaml_parser_XXXXXX.py)
 cat > "$_py" << 'PYEOF'
 import re, sys
@@ -57,9 +64,7 @@ _yaml_vars=$(python3 "$_py")
 rm -f "$_py"
 eval "$_yaml_vars"
 
-# Deployment mechanics — not bundle variables, not in databricks.yml
 PROFILE="DEFAULT"
-APP_NAME="icd10-gap-advisor"
 
 # ── Command-line overrides ────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -67,16 +72,14 @@ while [[ $# -gt 0 ]]; do
     --profile)           PROFILE="$2";           shift 2 ;;
     --catalog)           CATALOG="$2";           shift 2 ;;
     --schema)            SCHEMA="$2";            shift 2 ;;
-    --warehouse-id)      WAREHOUSE_ID="$2";      shift 2 ;;
+    --warehouse-name)    WAREHOUSE_NAME="$2";    shift 2 ;;
     --ka-display-name)   KA_DISPLAY_NAME="$2";   shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
 
-# ── Step 2: Derive workspace app path from bundle configuration ───────────────
-# databricks bundle validate resolves workspace.file_path from databricks.yml.
-# APP_SOURCE_PATH is always <workspace_root>/app — no manual flag required.
-echo "Resolving workspace app path from bundle..."
+# ── Step 2: Derive workspace file path from bundle configuration ──────────────
+_log "Resolving workspace path from bundle..."
 WORKSPACE_FILE_PATH=$(
   cd "$SCRIPT_DIR" && \
   databricks bundle validate --profile="$PROFILE" --output=json 2>/dev/null \
@@ -88,43 +91,45 @@ if [ -z "$WORKSPACE_FILE_PATH" ]; then
   exit 1
 fi
 APP_SOURCE_PATH="${WORKSPACE_FILE_PATH}/app"
-echo "  App path: $APP_SOURCE_PATH"
+_ok "Workspace path resolved"
+
 echo ""
-echo "═══════════════════════════════════════════════════"
-echo "  ICD-10 Gap Analysis Demo — Deployment"
-echo "═══════════════════════════════════════════════════"
 echo "  Profile:       $PROFILE"
-echo "  Catalog:       $CATALOG / $SCHEMA"
-echo "  App source:    $APP_SOURCE_PATH"
-echo "  KA name:       $KA_DISPLAY_NAME"
+echo "  Catalog:       $CATALOG.$SCHEMA"
+echo "  Warehouse:     $WAREHOUSE_NAME"
+echo "  KA:            $KA_DISPLAY_NAME"
 echo "  VS endpoint:   $VS_ENDPOINT_NAME"
-echo "═══════════════════════════════════════════════════"
+echo "  App:           $APP_NAME"
+echo "  App source:    $APP_SOURCE_PATH"
 echo ""
 
-# ── Step 2: Resolve SQL warehouse, KA endpoint, VS endpoint ──────────────────
-echo "▶ Step 3/7 — Resolving SQL warehouse, KA endpoint, and VS endpoint"
+# ════════════════════════════════════════════════════
+_section "Phase 1 — Bootstrap"
+# ════════════════════════════════════════════════════
+
+# ── Step 3: Resolve SQL warehouse, KA endpoint, VS endpoint ──────────────────
+echo ""
+echo "▶ Step 3/8 — Resolving infrastructure (warehouse · KA · VS endpoint)"
 _resource_vars=$(python3 "${SCRIPT_DIR}/setup_resources.py" \
     --profile           "$PROFILE" \
     --catalog           "$CATALOG" \
     --schema            "$SCHEMA" \
-    --warehouse-id      "$WAREHOUSE_ID" \
+    --warehouse-name    "$WAREHOUSE_NAME" \
     --ka-display-name   "$KA_DISPLAY_NAME" \
     --vs-endpoint-name  "$VS_ENDPOINT_NAME")
 eval "$_resource_vars"
 
-echo "  Warehouse:    $WAREHOUSE_ID"
-echo "  KA name:      $KA_DISPLAY_NAME"
-echo "  KA endpoint:  $KA_ENDPOINT_NAME"
-echo "  VS endpoint:  $VS_ENDPOINT_NAME"
-echo "✔ Resources resolved"
+echo ""
+_ok "Warehouse ID:   $WAREHOUSE_ID"
+_ok "KA endpoint:    $KA_ENDPOINT_NAME"
+_ok "VS endpoint:    $VS_ENDPOINT_NAME"
+_elapsed
 echo ""
 
-# ── Step 3: Generate app.yaml from resolved values ────────────────────────────
-# All variables from databricks.yml are reflected as env vars in the app.
-echo "▶ Step 4/7 — Generating app.yaml"
-TEMP_APP_YAML="$(mktemp /tmp/icd10_app_yaml.XXXXXX)"
-
-cat > "$TEMP_APP_YAML" << APPCFG
+# ── Step 4: Generate app.yaml ─────────────────────────────────────────────────
+echo "▶ Step 4/8 — Generating app.yaml"
+mkdir -p "${SCRIPT_DIR}/app"
+cat > "${SCRIPT_DIR}/app/app.yaml" << APPCFG
 command: ["python", "app.py"]
 
 # Generated by deploy.sh — do not edit manually.
@@ -156,32 +161,72 @@ resources:
       id: "${WAREHOUSE_ID}"
       permission: "CAN_USE"
 APPCFG
-
-databricks workspace import "${APP_SOURCE_PATH}/app.yaml" \
-  --file "$TEMP_APP_YAML" \
-  --format AUTO \
-  --overwrite \
-  --profile="$PROFILE"
-
-# Keep a local copy alongside deploy.sh so the project directory stays in sync
-mkdir -p "${SCRIPT_DIR}/app"
-cp "$TEMP_APP_YAML" "${SCRIPT_DIR}/app/app.yaml"
-
-rm -f "$TEMP_APP_YAML"
-echo "✔ app.yaml generated and uploaded (local copy saved to app/app.yaml)"
+_ok "app.yaml written with resolved values"
 echo ""
 
-# ── Step 4: Deploy the app ────────────────────────────────────────────────────
-echo "▶ Step 5/7 — Deploying Databricks App"
+# ── Step 5: File sync — push all files to workspace (no job creation) ────────
+echo "▶ Step 5/8 — Syncing all files to workspace"
+_log "Pushing app/, setup/, resources/, deploy.sh → $WORKSPACE_FILE_PATH"
+databricks sync --full --profile="$PROFILE" \
+  --exclude "data/**" --exclude "*.md" --exclude ".gitignore" --exclude "local.yml" \
+  "$SCRIPT_DIR" "$WORKSPACE_FILE_PATH"
+_ok "All files synced to workspace"
+_elapsed
+echo ""
+
+# ── Step 6: Create (if needed) + deploy the app ───────────────────────────────
+echo "▶ Step 6/8 — Deploying Databricks App: $APP_NAME"
+if ! databricks apps get "$APP_NAME" --profile="$PROFILE" --output=json > /dev/null 2>&1; then
+  _log "App does not exist — creating (this may take ~2 min)..."
+  databricks apps create "$APP_NAME" --profile="$PROFILE"
+  _ok "App created and compute ACTIVE"
+else
+  APP_COMPUTE_STATE=$(databricks apps get "$APP_NAME" --profile="$PROFILE" --output=json \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("compute_status",{}).get("state",""))')
+  _log "App exists — compute state: $APP_COMPUTE_STATE"
+  if [ "$APP_COMPUTE_STATE" = "STOPPED" ]; then
+    _log "Starting app..."
+    databricks apps start "$APP_NAME" --profile="$PROFILE"
+    _ok "App started"
+  elif [ "$APP_COMPUTE_STATE" != "ACTIVE" ]; then
+    _log "Waiting for app compute to become ACTIVE..."
+    for i in $(seq 1 24); do
+      sleep 10
+      APP_COMPUTE_STATE=$(databricks apps get "$APP_NAME" --profile="$PROFILE" --output=json \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin).get("compute_status",{}).get("state",""))')
+      _log "[${i}0s] compute state: $APP_COMPUTE_STATE"
+      [ "$APP_COMPUTE_STATE" = "ACTIVE" ] && break
+    done
+    if [ "$APP_COMPUTE_STATE" != "ACTIVE" ]; then
+      echo "ERROR: App compute did not reach ACTIVE within 240s"
+      exit 1
+    fi
+    _ok "App compute ACTIVE"
+  fi
+fi
+
+_log "Deploying source code snapshot..."
 databricks apps deploy "$APP_NAME" \
   --source-code-path "$APP_SOURCE_PATH" \
   --mode SNAPSHOT \
-  --profile="$PROFILE"
-echo "✔ App deployed"
+  --profile="$PROFILE" \
+  --output=json 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  ✔ Deployment {d[\"deployment_id\"][:12]}... — {d[\"status\"][\"state\"]}')" \
+  || databricks apps deploy "$APP_NAME" \
+       --source-code-path "$APP_SOURCE_PATH" \
+       --mode SNAPSHOT \
+       --profile="$PROFILE"
+_elapsed
 echo ""
 
-# ── Step 5: Read app SP + grant permissions ───────────────────────────────────
-echo "▶ Step 6/7 — Granting permissions to app service principal"
+# ════════════════════════════════════════════════════
+_section "Phase 2 — Finalise"
+# ════════════════════════════════════════════════════
+
+# ── Step 7: Read app SP + grant permissions ───────────────────────────────────
+echo ""
+echo "▶ Step 7/8 — Granting permissions to app service principal"
+_log "Reading app service principal..."
 APP_SP_CLIENT_ID=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["service_principal_client_id"])'
@@ -190,14 +235,16 @@ APP_SP_NAME=$(
   databricks apps get "$APP_NAME" --profile="$PROFILE" -o json \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["service_principal_name"])'
 )
-echo "  App SP: $APP_SP_NAME ($APP_SP_CLIENT_ID)"
+_ok "App SP: $APP_SP_NAME"
 
+_log "Granting warehouse CAN_USE..."
 databricks permissions update warehouses "$WAREHOUSE_ID" \
   --profile="$PROFILE" \
   --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_USE\"}]}" \
   > /dev/null
-echo "  ✔ Warehouse CAN_USE granted"
+_ok "Warehouse     → CAN_USE"
 
+_log "Granting KA serving endpoint CAN_QUERY..."
 KA_ENDPOINT_ID=$(
   databricks serving-endpoints get "$KA_ENDPOINT_NAME" --profile="$PROFILE" -o json \
   | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'
@@ -206,15 +253,17 @@ databricks permissions update serving-endpoints "$KA_ENDPOINT_ID" \
   --profile="$PROFILE" \
   --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_QUERY\"}]}" \
   > /dev/null
-echo "  ✔ KA serving endpoint CAN_QUERY granted ($KA_ENDPOINT_NAME)"
+_ok "KA endpoint   → CAN_QUERY ($KA_ENDPOINT_NAME)"
 
+_log "Granting KA resource CAN_QUERY..."
 KA_ID="${KA_NAME#knowledge-assistants/}"
 databricks permissions update knowledge-assistants "$KA_ID" \
   --profile="$PROFILE" \
   --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_QUERY\"}]}" \
   > /dev/null
-echo "  ✔ KA resource CAN_QUERY granted (knowledge-assistants/$KA_ID)"
+_ok "KA resource   → CAN_QUERY"
 
+_log "Granting VS endpoint CAN_USE..."
 VS_ENDPOINT_ID=$(
   databricks api get "/api/2.0/vector-search/endpoints/${VS_ENDPOINT_NAME}" \
     --profile="$PROFILE" \
@@ -224,39 +273,19 @@ databricks api patch "/api/2.0/permissions/vector-search-endpoints/${VS_ENDPOINT
   --profile="$PROFILE" \
   --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_USE\"}]}" \
   > /dev/null
-echo "  ✔ VS endpoint CAN_USE granted ($VS_ENDPOINT_NAME)"
-echo "✔ Permissions granted"
+_ok "VS endpoint   → CAN_USE ($VS_ENDPOINT_NAME)"
+
+_log "Job permissions will be set by DAB deploy in Step 8"
+_elapsed
 echo ""
 
-# ── Step 7: Sync setup notebooks for bundle deploy ───────────────────────────
-# Pull the 7 setup notebooks from the workspace into the local directory so
-# the bundle sync includes them — prevents deletion and keeps them managed by
-# the bundle. Only the setup notebooks are needed; app/, data/ are excluded.
-echo "▶ Step 7/8 — Syncing setup notebooks for bundle"
-mkdir -p "${SCRIPT_DIR}/setup"
-NOTEBOOKS_SYNCED=0
-for nb in 01_create_catalog 02_setup_care_gap_rules 02_ingest_patient_json \
-           03_load_icd10_pdfs_to_volume 04_configure_knowledge_source \
-           05_configure_ai_gateway 06_create_care_gap_vs_index; do
-  if databricks workspace export "${WORKSPACE_FILE_PATH}/setup/${nb}" \
-       --format SOURCE --file "${SCRIPT_DIR}/setup/${nb}.py" \
-       --profile="$PROFILE" 2>/dev/null; then
-    NOTEBOOKS_SYNCED=$((NOTEBOOKS_SYNCED + 1))
-  else
-    echo "  ⚠ ${nb} not found in workspace — skipping"
-  fi
-done
-echo "✔ ${NOTEBOOKS_SYNCED} setup notebooks synced to local directory"
-echo ""
-
-# ── Step 8: Bundle deploy (Jobs) ──────────────────────────────────────────────
-# All variable values flow from databricks.yml defaults + step 3 resolution.
-echo "▶ Step 8/8 — Deploying bundle (Jobs)"
+# ── Step 8: DAB deploy — create jobs with app SP permissions ─────────────────
+echo "▶ Step 8/8 — DAB deploy (create Databricks Jobs with app SP permissions)"
+_log "Deploying bundle resources: Job 1 (Data Setup) + Job 2 (KA Setup)..."
 DATABRICKS_TF_EXEC_PATH=$(which terraform) DATABRICKS_TF_VERSION=1.15.2 \
 databricks bundle deploy \
   --var="catalog=$CATALOG" \
   --var="schema=$SCHEMA" \
-  --var="warehouse_id=$WAREHOUSE_ID" \
   --var="fmapi_endpoint=$FMAPI_ENDPOINT" \
   --var="ka_endpoint_name=$KA_ENDPOINT_NAME" \
   --var="ka_name=$KA_NAME" \
@@ -265,19 +294,32 @@ databricks bundle deploy \
   --var="app_service_principal=$APP_SP_CLIENT_ID" \
   --var="vs_endpoint_name=$VS_ENDPOINT_NAME" \
   --profile="$PROFILE"
-echo "✔ Bundle deployed"
+_ok "Jobs created with app SP permissions"
+_elapsed
 echo ""
 
-echo "═══════════════════════════════════════════════════"
-echo "  Deployment complete!"
+# ── Summary ───────────────────────────────────────────────────────────────────
+BUNDLE_TARGET="dev"
+CURRENT_USER_SHORT=$(databricks current-user me --profile="$PROFILE" --output=json \
+  | python3 -c 'import sys,json; u=json.load(sys.stdin).get("userName",""); print(u.split("@")[0].replace(".","_"))')
+TOTAL_TIME=$(( $(date +%s) - DEPLOY_START ))
+
+echo "╔══════════════════════════════════════════════════╗"
+echo "║   Deployment Complete  ✔                         ║"
+echo "╚══════════════════════════════════════════════════╝"
 echo ""
+echo "  App URL:     $(databricks apps get "$APP_NAME" --profile="$PROFILE" --output=json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url","(check Databricks Apps UI)"))' 2>/dev/null || echo '(check Databricks Apps UI)')"
 echo "  App:         $APP_NAME"
-echo "  Warehouse:   $WAREHOUSE_ID"
+echo "  Warehouse:   $WAREHOUSE_NAME ($WAREHOUSE_ID)"
 echo "  KA endpoint: $KA_ENDPOINT_NAME"
 echo "  VS endpoint: $VS_ENDPOINT_NAME"
-echo "  Care Gap:    databricks-claude-sonnet-4-6 (FMAPI)"
+echo "  Job 1:       [$BUNDLE_TARGET $CURRENT_USER_SHORT] $DATA_SETUP_JOB_NAME"
+echo "  Job 2:       [$BUNDLE_TARGET $CURRENT_USER_SHORT] $AI_SETUP_JOB_NAME"
+echo ""
+echo "  Total time:  ${TOTAL_TIME}s"
 echo ""
 echo "  Next steps:"
-echo "  1. Open the app → run Job 1 (Data Setup)"
-echo "  2. Run Job 2 (Knowledge Assistant Setup) after Job 1 completes"
-echo "═══════════════════════════════════════════════════"
+echo "  1. Open the app URL → navigate to Setup"
+echo "  2. Run Job 1 (Data Setup)"
+echo "  3. Run Job 2 (KA Setup) after Job 1 completes"
+echo ""

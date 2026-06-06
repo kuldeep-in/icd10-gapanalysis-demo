@@ -10,6 +10,9 @@ resources:
         Job 1 of 2 — Creates Unity Catalog structure, ingests patient clinical notes,
         and uploads ICD-10 PDFs to the UC Volume. Runs entirely on serverless compute.
 
+      tags:
+        Demo: icd10-gapanalysis
+
       environments:
         - environment_key: default
           spec:
@@ -77,6 +80,9 @@ resources:
         volume to the Knowledge Assistant and triggers PDF indexing.
         The Knowledge Assistant is pre-created by setup_resources.py during deploy.
         Runs on serverless compute. Run after the Data Setup job completes.
+
+      tags:
+        Demo: icd10-gapanalysis
 
       environments:
         - environment_key: default
