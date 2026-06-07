@@ -8,7 +8,7 @@ import dash_bootstrap_components as dbc
 from config import (
     w, CATALOG, SCHEMA, WAREHOUSE_ID,
     KA_ENDPOINT_NAME, KA_NAME, FMAPI_ENDPOINT,
-    VS_ENDPOINT_NAME,
+    VS_ENDPOINT_NAME, VS_INDEX_NAME, GENIE_SPACE_ID,
     DATA_SETUP_JOB_NAME, AI_SETUP_JOB_NAME,
     BOOTSTRAP_STEPS, GROUP_META, STATUS_META, DONE_STATUSES,
     JOB1_STEPS, JOB2_STEPS, logger, _app_sp_name,
@@ -44,8 +44,7 @@ def _load_bootstrap_statuses(catalog: str, schema: str) -> dict:
     try:
         rows = execute_sql(
             f"SELECT step, status, details, updated_at "
-            f"FROM `{catalog}`.`{schema}`.bootstrap_status "
-            f"WHERE status = 'COMPLETED'"
+            f"FROM `{catalog}`.`{schema}`.bootstrap_status"
         )
         return {r["step"]: r for r in rows}
     except Exception as e:
@@ -97,8 +96,12 @@ def _chk_ka_sources(ka_name: str, volume_path: str) -> dict:
             None,
         )
         if not matched:
-            return {"source_found": False, "state": "", "ingestion": {},
-                    "error": None, "source_count": len(sources)}
+            # Path format mismatch — fall back to any source with UPDATED state.
+            # Safe because we only ever attach one knowledge source in this app.
+            matched = next((s for s in sources if s.get("state") == "UPDATED"), None)
+            if not matched:
+                return {"source_found": False, "state": "", "ingestion": {},
+                        "error": None, "source_count": len(sources)}
         return {
             "source_found": True,
             "state":        matched.get("state", ""),
@@ -107,6 +110,7 @@ def _chk_ka_sources(ka_name: str, volume_path: str) -> dict:
             "error":        None,
         }
     except Exception as e:
+        logger.warning(f"_chk_ka_sources failed: {e}")
         return {"source_found": False, "state": "", "ingestion": {}, "error": str(e)[:120]}
 
 
@@ -135,61 +139,44 @@ def _cache_ka_sync_status(catalog: str, schema: str, detail: str) -> None:
 # During indexing: 1 SQL + 1 KA API; writes cache on first UPDATED result
 # ---------------------------------------------------------------------------
 def _check_step_statuses(catalog: str, schema: str) -> list[dict]:
+    """
+    All step statuses come from bootstrap_status.
+    04_configure_knowledge_source.py (Job 2 Task 2) polls the KA API with admin
+    credentials and writes ka_source_sync = COMPLETED/WARNING/FAILED when done.
+    The app SP does not call the KA knowledge-sources API (requires CAN_MANAGE,
+    not CAN_QUERY which the app SP has).
+    """
     db_statuses = _load_bootstrap_statuses(catalog, schema)
-
-    # Skip KA API entirely if sync result is already cached in bootstrap_status
-    ka_src = None
-    if "ka_source_sync" not in db_statuses:
-        ka_src = _chk_ka_sources(KA_NAME, f"/Volumes/{catalog}/{schema}/icd10_reference_pdfs")
 
     result = []
     for step in BOOTSTRAP_STEPS:
         sid = step["step_id"]
 
-        # Steps 1–5: trust bootstrap_status written by the setup notebooks
-        if sid in db_statuses:
-            row = db_statuses[sid]
-            ts  = str(row.get("updated_at", ""))[:19].replace("T", " ")
+        if sid not in db_statuses:
+            result.append({**step, "status": "NOT_STARTED",
+                           "detail": "Not yet started", "checks": [], "updated_at": ""})
+            continue
+
+        row       = db_statuses[sid]
+        db_status = row.get("status", "COMPLETED")
+        detail    = row.get("details", "")
+        ts        = str(row.get("updated_at", ""))[:19].replace("T", " ")
+
+        if db_status == "COMPLETED":
             result.append({**step, "status": "COMPLETED",
-                           "detail": row.get("details", ""), "checks": [], "updated_at": ts})
-            continue
-
-        # Step 6: KA sync state is dynamic — derived from the KA API response
-        if sid == "ka_source_sync":
-            state     = (ka_src or {}).get("state", "")
-            ingestion = (ka_src or {}).get("ingestion", {})
-            if not ka_src or not ka_src.get("source_found"):
-                status = "NOT_STARTED"
-                detail = "Volume not attached — complete step 5 first"
-            elif state == "UPDATED":
-                total   = ingestion.get("total_file_count",   "?")
-                success = ingestion.get("success_file_count", "?")
-                failed  = ingestion.get("failed_file_count",  "0")
-                vectors = ingestion.get("vector_count",       "?")
-                status  = "COMPLETED"
-                detail  = f"{success}/{total} files indexed · {vectors} vectors"
-                if str(failed) not in ("0", ""):
-                    detail += f" · {failed} failed"
-            elif state in ("UPDATING", "PENDING", "RUNNING"):
-                success = ingestion.get("success_file_count", "0")
-                total   = ingestion.get("total_file_count",   "?")
-                status  = "IN_PROGRESS"
-                detail  = f"Indexing in progress — {success}/{total} files done"
-            elif state == "FAILED":
-                status = "FAILED"
-                detail = "Indexing failed — check KA sources in Databricks UI"
-            else:
-                status = "NOT_STARTED"
-                detail = f"Sync state: {state or 'unknown'}"
-            ts = datetime.now().strftime("%H:%M:%S") if status in DONE_STATUSES else ""
-            if status == "COMPLETED":
-                _cache_ka_sync_status(catalog, schema, detail)
-            result.append({**step, "status": status, "detail": detail,
-                           "checks": [], "updated_at": ts})
-            continue
-
-        result.append({**step, "status": "NOT_STARTED", "detail": "Not yet started",
-                       "checks": [], "updated_at": ""})
+                           "detail": detail, "checks": [], "updated_at": ts})
+        elif db_status == "IN_PROGRESS":
+            result.append({**step, "status": "IN_PROGRESS",
+                           "detail": detail or "In progress…", "checks": [], "updated_at": ""})
+        elif db_status == "FAILED":
+            result.append({**step, "status": "FAILED",
+                           "detail": detail, "checks": [], "updated_at": ts})
+        elif db_status == "WARNING":
+            result.append({**step, "status": "WARNING",
+                           "detail": detail, "checks": [], "updated_at": ts})
+        else:
+            result.append({**step, "status": "NOT_STARTED",
+                           "detail": "Not yet started", "checks": [], "updated_at": ""})
 
     return result
 
@@ -370,17 +357,22 @@ def _settings_column() -> dbc.Col:
         ], className="hc-card-header-config"),
         dbc.CardBody([
             _section("Unity Catalog"),
-            _cfg_row("Catalog", CATALOG or "—", "fa-layer-group"),
-            _cfg_row("Schema",  SCHEMA  or "—", "fa-table"),
+            _cfg_row("Catalog",  CATALOG or "—", "fa-layer-group"),
+            _cfg_row("Schema",   SCHEMA  or "—", "fa-table"),
             html.Hr(className="my-2"),
             _section("Infrastructure"),
-            _cfg_row("SQL Warehouse", WAREHOUSE_ID or "Not set", "fa-warehouse", warn=wh_missing),
+            _cfg_row("SQL Warehouse",  WAREHOUSE_ID     or "Not set", "fa-warehouse",    warn=wh_missing),
+            _cfg_row("VS Endpoint",    VS_ENDPOINT_NAME or "Not set", "fa-circle-nodes", warn=not VS_ENDPOINT_NAME),
+            _cfg_row("VS Index",       VS_INDEX_NAME    or "Not set", "fa-magnifying-glass"),
             html.Hr(className="my-2"),
-            _section("AI Configuration"),
-            _cfg_row("Care Gap Model", FMAPI_ENDPOINT      or "Not set", "fa-microchip"),
-            _cfg_row("KA Endpoint",    KA_ENDPOINT_NAME    or "Not set", "fa-robot",    warn=not KA_ENDPOINT_NAME),
-            _cfg_row("Data Setup Job", DATA_SETUP_JOB_NAME or "—",       "fa-play"),
-            _cfg_row("AI Setup Job",   AI_SETUP_JOB_NAME   or "—",       "fa-play"),
+            _section("AI Services"),
+            _cfg_row("Care Gap Model", FMAPI_ENDPOINT   or "Not set", "fa-microchip"),
+            _cfg_row("KA Endpoint",    KA_ENDPOINT_NAME or "Not set", "fa-robot",    warn=not KA_ENDPOINT_NAME),
+            _cfg_row("Genie Space",    GENIE_SPACE_ID   or "Not set", "fa-comments", warn=not GENIE_SPACE_ID),
+            html.Hr(className="my-2"),
+            _section("Jobs"),
+            _cfg_row("Data Setup Job", DATA_SETUP_JOB_NAME or "—", "fa-play"),
+            _cfg_row("AI Setup Job",   AI_SETUP_JOB_NAME   or "—", "fa-play"),
             html.Hr(className="my-2"),
             _section("App Identity"),
             _cfg_row("Service Principal", _app_sp_name or "Not resolved",
@@ -441,8 +433,6 @@ def _job_column(group: int, g_steps: list[dict], action: dict,
             ) if not prereqs_ok else None
         )
 
-    run_area = html.Div([run_btn, run_hint], className="d-flex flex-column align-items-center")
-
     card = dbc.Card([
         dbc.CardHeader(
             dbc.Row([
@@ -450,16 +440,16 @@ def _job_column(group: int, g_steps: list[dict], action: dict,
                     html.I(className=f"fa-solid {meta['icon']} me-2"),
                     html.Strong(meta["label"], style={"fontSize": "14px"}),
                 ], width="auto"),
-                dbc.Col(_group_badge(g_steps), width="auto", className="ms-auto"),
+                dbc.Col(
+                    html.Div([run_btn, run_hint],
+                             className="d-flex flex-column align-items-end"),
+                    width="auto", className="ms-auto",
+                ),
             ], align="center"),
             style={"background": meta["bg"], "borderBottom": f"2px solid {border_color}"},
         ),
         dbc.CardBody([
-            dbc.Row([
-                dbc.Col(_prereq_section(prereqs) if prereqs else None, className="pe-2"),
-                dbc.Col(run_area, width="auto",
-                        className="d-flex align-items-center border-start ps-3"),
-            ], align="center", className="mb-3 g-0"),
+            _prereq_section(prereqs) if prereqs else None,
             html.Div(id=result_id, className="mb-2"),
             html.Div(accordion),
         ], className="p-2"),

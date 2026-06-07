@@ -14,27 +14,19 @@ KA_ENDPOINT_NAME    = os.getenv("KA_ENDPOINT_NAME")
 KA_NAME             = os.getenv("KA_NAME")
 FMAPI_ENDPOINT      = os.getenv("FMAPI_ENDPOINT")
 VS_ENDPOINT_NAME    = os.getenv("VS_ENDPOINT_NAME")
+GENIE_SPACE_ID      = os.getenv("GENIE_SPACE_ID")
 # VS index name is always deterministic — derived from catalog + schema at runtime
 VS_INDEX_NAME       = f"{CATALOG}.{SCHEMA}.care_gap_rules_vs_index" if CATALOG and SCHEMA else None
 
 BRAND_ORANGE = "#E87722"
 
-JOB1_STEPS = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index"}
+JOB1_STEPS = {"setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index", "genie_configured"}
 JOB2_STEPS = {"load_icd10_pdfs", "ka_source_configured", "ka_source_sync"}
 
 BOOTSTRAP_STEPS = [
     {
-        "step_id":     "create_catalog",
-        "seq":         1,
-        "group":       1,
-        "label":       "Catalog & Schema Setup",
-        "description": "Create Unity Catalog, schema, all Delta tables (patient_records, "
-                       "care_gap_rules, bootstrap_status), UC Volume, and grant app SP permissions.",
-        "icon":        "fa-database",
-    },
-    {
         "step_id":     "setup_care_gap_rules",
-        "seq":         2,
+        "seq":         1,
         "group":       1,
         "label":       "Care Gap Rules Loaded",
         "description": "Seed the care_gap_rules table with 20 evidence-based clinical rules "
@@ -43,7 +35,7 @@ BOOTSTRAP_STEPS = [
     },
     {
         "step_id":     "ingest_patient_data",
-        "seq":         3,
+        "seq":         2,
         "group":       1,
         "label":       "Patient Clinical Notes Ingested",
         "description": "Load 25 synthetic SOAP-format patient records from "
@@ -52,13 +44,23 @@ BOOTSTRAP_STEPS = [
     },
     {
         "step_id":     "care_gap_vs_index",
-        "seq":         4,
+        "seq":         3,
         "group":       1,
         "label":       "Care Gap VS Index Ready",
         "description": "Vector Search index on care_gap_rules is ONLINE and all rules are embedded "
                        "using databricks-gte-large-en. Required for semantic rule retrieval in "
                        "the Care Gap Advisor.",
         "icon":        "fa-magnifying-glass",
+    },
+    {
+        "step_id":     "genie_configured",
+        "seq":         4,
+        "group":       1,
+        "label":       "Genie Space Tables Configured",
+        "description": "Patient records, ICD-10 analysis results, care gap findings and care gap rules "
+                       "tables are registered to the Genie Space. Enables the AI chat assistant in "
+                       "the floating panel.",
+        "icon":        "fa-comments",
     },
     {
         "step_id":     "load_icd10_pdfs",

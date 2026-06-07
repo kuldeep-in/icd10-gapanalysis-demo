@@ -256,6 +256,65 @@ hr { border-color: var(--hc-border) !important; opacity: 0.6; }
 .h-100      { height: 100% !important; }
 /* ── Navbar glow on active ──────────────── */
 .navbar button.active, .navbar button:active { color: var(--hc-primary) !important; }
+/* ── Home patient accordion ─────────────── */
+#home-patient-accordion .accordion-item {
+  border: 1px solid #1E4A7A !important;
+  border-left: 3px solid var(--hc-primary) !important;
+  border-radius: 8px !important;
+  margin-bottom: 7px !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+#home-patient-accordion .accordion-item:hover {
+  border-color: var(--hc-primary) !important;
+  border-left-color: var(--hc-teal) !important;
+  box-shadow: 0 0 0 1px rgba(79,195,247,0.15),
+              0 4px 16px rgba(0,0,0,0.4) !important;
+}
+#home-patient-accordion .accordion-item:has(.accordion-button:not(.collapsed)) {
+  border-left-color: var(--hc-teal) !important;
+  border-color: var(--hc-teal) !important;
+  box-shadow: 0 0 0 1px rgba(77,208,225,0.2),
+              0 4px 20px rgba(0,0,0,0.45) !important;
+}
+/* ── Genie floating panel ───────────────── */
+#genie-toggle-btn {
+  position: fixed; right: 0; top: 50%;
+  transform: translateY(-50%);
+  z-index: 1050;
+  border-radius: 10px 0 0 10px !important;
+  background: linear-gradient(160deg, #0288D1, #00ACC1) !important;
+  color: #fff !important; border: none !important;
+  padding: 14px 9px !important;
+  box-shadow: -3px 0 16px rgba(0,0,0,0.5) !important;
+  transition: padding-right 0.2s, box-shadow 0.2s;
+  writing-mode: vertical-rl; text-orientation: mixed;
+  font-size: 18px; cursor: pointer;
+}
+#genie-toggle-btn:hover {
+  padding-right: 14px !important;
+  box-shadow: -4px 0 22px rgba(2,136,209,0.5) !important;
+}
+#genie-panel {
+  position: fixed; right: 0; top: 70px;
+  height: calc(100vh - 90px); width: 50vw;
+  z-index: 1040;
+  background: var(--hc-surface);
+  border-left: 1px solid var(--hc-border);
+  box-shadow: -4px 0 32px rgba(0,0,0,0.6);
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
+}
+#genie-panel.open { transform: translateX(0); }
+.genie-typing-dots span {
+  display: inline-block; color: var(--hc-primary);
+  font-size: 18px; margin: 0 2px;
+  animation: genie-bounce 1s infinite;
+}
+@keyframes genie-bounce {
+  0%,80%,100% { transform: translateY(0); opacity:0.4; }
+  40%         { transform: translateY(-6px); opacity:1; }
+}
 /* ── ICD-10 results table — dark theme contrast ── */
 .table-sm td, .table-sm th {
   background-color: transparent !important;
@@ -317,6 +376,7 @@ import tab_home      # noqa: E402
 import tab_icd10     # noqa: E402
 import tab_caregap   # noqa: E402
 import tab_setup     # noqa: E402
+import tab_genie     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Navbar
@@ -427,6 +487,23 @@ app.layout = html.Div([
                        color="secondary", outline=True, size="sm", className="ms-2"),
         ]),
     ], id="delete-confirm-modal", is_open=False, size="sm", centered=True),
+
+    # ── Genie floating toggle button ─────────────────────────────────────────
+    html.Button(
+        html.I(className="fa-solid fa-comments"),
+        id="genie-toggle-btn", n_clicks=0,
+        title="Patient Data Assistant",
+    ),
+
+    # ── Genie side panel ─────────────────────────────────────────────────────
+    html.Div(
+        id="genie-panel",
+        children=tab_genie.genie_panel(),
+        className="",   # "open" class added/removed by callback
+    ),
+
+    # Genie open/closed state
+    dcc.Store(id="genie-open-store", data=False),
 
     # Home delete modal
     dbc.Modal([
@@ -560,8 +637,8 @@ def update_nav_active(active_tab, active_page):
 # First-time path:                  1 SQL → bootstrap_status, set flag if done
 # No KA API on root — that detail is only needed on /setup
 # ---------------------------------------------------------------------------
-_JOB1_STEPS = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index"}
-_ALL_STEPS  = {"create_catalog", "setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index",
+_JOB1_STEPS = {"setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index", "genie_configured"}
+_ALL_STEPS  = {"setup_care_gap_rules", "ingest_patient_data", "care_gap_vs_index", "genie_configured",
                "load_icd10_pdfs", "ka_source_configured", "ka_source_sync"}
 
 
@@ -671,6 +748,31 @@ def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema,
             restore_saved_findings=gap_saved_findings)
 
     return html.Div()
+
+
+# ---------------------------------------------------------------------------
+# Genie panel open / close
+# ---------------------------------------------------------------------------
+@callback(
+    Output("genie-open-store", "data"),
+    Input("genie-toggle-btn",  "n_clicks"),
+    Input("genie-close-btn",   "n_clicks"),
+    State("genie-open-store",  "data"),
+    prevent_initial_call=True,
+)
+def toggle_genie(toggle_n, close_n, is_open):
+    triggered = dash.callback_context.triggered_id
+    if triggered == "genie-close-btn":
+        return False
+    return not is_open
+
+
+@callback(
+    Output("genie-panel", "className"),
+    Input("genie-open-store", "data"),
+)
+def update_genie_panel_class(is_open):
+    return "open" if is_open else ""
 
 
 if __name__ == "__main__":

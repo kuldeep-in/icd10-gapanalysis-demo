@@ -109,7 +109,12 @@ def _patient_accordion_item(p: dict, codes: list[dict], findings: list[dict]) ->
     gap_style      = {"fontSize": "10px"} if n_gaps > 0 else {"fontSize": "10px", "color": "#198754"}
 
     title = html.Div([
-        html.Span(pid, className="fw-bold me-3", style={"minWidth": "70px"}),
+        html.Span([
+            html.I(className="fa-solid fa-circle-user me-2",
+                   style={"color": "var(--hc-primary)", "fontSize": "16px"}),
+            html.Span(pid),
+        ], className="fw-bold me-3 d-flex align-items-center gap-1",
+           style={"minWidth": "90px"}),
         html.Small(f"{gender}, {dob}", className="text-muted me-3",
                    style={"width": "140px", "flexShrink": "0", "fontSize": "12px"}),
         dbc.Badge(
