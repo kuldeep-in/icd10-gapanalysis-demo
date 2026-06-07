@@ -62,6 +62,16 @@ def _api_get(path: str) -> dict:
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
+def _api_patch(path: str, body: dict) -> dict:
+    """PATCH /api/... via databricks api patch, body passed via --json flag."""
+    cmd = ["databricks", "api", "patch", path,
+           f"--profile={PROFILE}", "--json", json.dumps(body)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    return json.loads(result.stdout) if result.stdout.strip() else {}
+
+
 def _api_post(path: str, body: dict) -> dict:
     """POST /api/... via databricks api post, body passed via --json flag."""
     cmd = ["databricks", "api", "post", path,
@@ -268,6 +278,14 @@ def resolve_genie_space(space_name: str, warehouse_id: str) -> str:
             if match:
                 space_id = match.get("space_id") or match.get("id", "")
                 _info(f"✔ Genie Space found: {space_id}")
+                # Always update warehouse to current deployment's warehouse
+                # (space may have been created with a previous/deleted warehouse)
+                try:
+                    _api_patch(f"/api/2.0/genie/spaces/{space_id}",
+                               {"warehouse_id": warehouse_id})
+                    _info(f"  Warehouse updated to: {warehouse_id}")
+                except Exception as e:
+                    _info(f"  Warning: could not update warehouse: {e}")
                 return space_id
     except Exception as e:
         _info(f"  Could not list Genie Spaces: {e}")

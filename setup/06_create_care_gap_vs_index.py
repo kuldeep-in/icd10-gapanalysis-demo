@@ -72,14 +72,16 @@ def _vs_status(index_name):
 # Step 1: Determine what needs to be done
 # ---------------------------------------------------------------------------
 
-# Check index existence and current state
+# Check index existence using _vs_get directly — NOT _vs_status which swallows all
+# exceptions and would incorrectly set index_exists=True when index is not found.
 index_exists = False
 index_ready  = False
 try:
-    status = _vs_status(VS_INDEX)
+    data = _vs_get(VS_INDEX)
     index_exists = True
-    index_ready  = "READY" in status or "ONLINE" in status
-    print(f"VS index found — status: {status or 'unknown'}")
+    raw_status   = (data.get("status", {}).get("detailed_state") or "").upper()
+    index_ready  = "READY" in raw_status or "ONLINE" in raw_status
+    print(f"VS index found — status: {raw_status or 'unknown'}")
 except Exception as e:
     if any(x in str(e) for x in ("NOT_FOUND", "404", "does not exist", "RESOURCE_DOES_NOT_EXIST")):
         print("VS index does not exist — will create")

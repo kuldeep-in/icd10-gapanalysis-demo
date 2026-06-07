@@ -641,8 +641,15 @@ def refresh_setup(n_clicks, n_intervals, catalog, schema):
     ]
     prereqs2 = [{"icon": "fa-robot", "label": "KA Endpoint", "value": KA_ENDPOINT_NAME, "ok": ka_chk["ok"]}]
 
-    job1_steps_done = all(s["status"] in DONE_STATUSES for s in steps if s["step_id"] in JOB1_STEPS)
-    job2_steps_done = all(s["status"] in DONE_STATUSES for s in steps if s["step_id"] in JOB2_STEPS)
+    def _job_done(s: dict) -> bool:
+        # Async steps (e.g. ka_source_sync) count as done once the job task itself
+        # finished — even if the background process is still running (IN_PROGRESS/WARNING).
+        if s.get("is_async"):
+            return s["status"] in (*DONE_STATUSES, "IN_PROGRESS", "WARNING")
+        return s["status"] in DONE_STATUSES
+
+    job1_steps_done = all(_job_done(s) for s in steps if s["step_id"] in JOB1_STEPS)
+    job2_steps_done = all(_job_done(s) for s in steps if s["step_id"] in JOB2_STEPS)
     act1 = {
         "action":      "done" if job1_steps_done else "run_job1",
         "job_id":      1,

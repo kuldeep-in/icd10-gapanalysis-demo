@@ -291,8 +291,26 @@ def _build_overview(patients: list[dict], all_findings: dict, all_icd10: dict) -
     )
 
     return dbc.Row([
-        dbc.Col(stats_col, md=3),
-        dbc.Col(accordion,  md=9),
+        dbc.Col(
+            html.Div(stats_col, style={
+                "background": "#0A1828",
+                "borderRadius": "12px",
+                "padding": "14px",
+                "border": "1px solid #1A3248",
+                "height": "100%",
+            }),
+            md=3,
+        ),
+        dbc.Col(
+            html.Div(accordion, style={
+                "background": "#0D2137",
+                "borderRadius": "12px",
+                "padding": "14px",
+                "border": "1px solid #1E3A52",
+                "height": "100%",
+            }),
+            md=9,
+        ),
     ], className="g-3")
 
 
