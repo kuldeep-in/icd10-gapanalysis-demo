@@ -7,8 +7,9 @@ resources:
     bootstrap_data_setup:
       name: ${var.data_setup_job_name}
       description: >
-        Job 1 of 2 — Creates Unity Catalog structure, ingests patient clinical notes,
-        and uploads ICD-10 PDFs to the UC Volume. Runs entirely on serverless compute.
+        Job 1 of 2 — Seeds care gap rules, ingests patient clinical notes,
+        builds the VS index and configures the Genie Space. Catalog, schema, tables
+        and UC permissions are all created by deploy.sh at deployment time.
 
       tags:
         Demo: icd10-gapanalysis
@@ -23,20 +24,8 @@ resources:
           level: CAN_MANAGE_RUN
 
       tasks:
-        - task_key: create_catalog
-          description: Create Unity Catalog, schema, all Delta tables, UC Volume, and grant app SP permissions
-          environment_key: default
-          notebook_task:
-            notebook_path: ${workspace.file_path}/setup/01_create_catalog
-            base_parameters:
-              catalog: ${var.catalog}
-              schema: ${var.schema}
-              app_sp_id: ${var.app_service_principal}
-
         - task_key: setup_care_gap_rules
           description: Seed care_gap_rules table with HEDIS/ACC/ADA evidence-based clinical rules
-          depends_on:
-            - task_key: create_catalog
           environment_key: default
           notebook_task:
             notebook_path: ${workspace.file_path}/setup/02_setup_care_gap_rules
@@ -47,8 +36,6 @@ resources:
 
         - task_key: ingest_patient_data
           description: Load patient_records.json via spark.read.json into patient_records table
-          depends_on:
-            - task_key: create_catalog
           environment_key: default
           notebook_task:
             notebook_path: ${workspace.file_path}/setup/02_ingest_patient_json
@@ -68,6 +55,20 @@ resources:
               schema: ${var.schema}
               app_sp_id: ${var.app_service_principal}
               vs_endpoint_name: ${var.vs_endpoint_name}
+
+        - task_key: configure_genie_space
+          description: Register patient_records, icd10_analysis_results, care_gap_findings and care_gap_rules tables to the Genie Space
+          depends_on:
+            - task_key: create_vs_index
+            - task_key: ingest_patient_data
+          environment_key: default
+          notebook_task:
+            notebook_path: ${workspace.file_path}/setup/07_configure_genie_space
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              genie_space_id: ${var.genie_space_id}
+              app_sp_id: ${var.app_service_principal}
 
     # ── Job 2: Knowledge Assistant Setup (Serverless) ────────────────────────
     # Uploads ICD-10 PDFs to the UC Volume and attaches the volume to the KA.

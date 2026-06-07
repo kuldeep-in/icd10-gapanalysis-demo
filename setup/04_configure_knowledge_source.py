@@ -178,3 +178,70 @@ spark.sql(f"""
 
 print(f"\nStep complete — bootstrap_status updated: ka_source_configured → COMPLETED")
 print(f"KA endpoint: {KA_ENDPOINT_NAME}")
+
+# COMMAND ----------
+
+# ---------------------------------------------------------------------------
+# Poll for PDF sync completion — this notebook runs with admin credentials
+# so the knowledge-sources API is accessible. The app SP only has CAN_QUERY
+# on the KA and cannot list knowledge sources, so detection must happen here.
+# ---------------------------------------------------------------------------
+def _merge_sync_status(status: str, detail: str) -> None:
+    spark.sql(f"""
+        MERGE INTO `{CATALOG}`.`{SCHEMA}`.bootstrap_status AS t
+        USING (SELECT 'ka_source_sync' AS step) AS s ON t.step = s.step
+        WHEN MATCHED THEN UPDATE SET
+            status = '{status}', updated_at = current_timestamp(),
+            details = '{detail}'
+        WHEN NOT MATCHED THEN INSERT (step, status, updated_at, details)
+            VALUES ('ka_source_sync', '{status}', current_timestamp(), '{detail}')
+    """)
+
+# Write IN_PROGRESS immediately so the Setup page shows sync is running
+_merge_sync_status("IN_PROGRESS", "PDF indexing in progress — polling for completion")
+print("bootstrap_status: ka_source_sync → IN_PROGRESS")
+
+# COMMAND ----------
+
+# Poll until KA source reaches UPDATED state (max 90 min)
+print("\nPolling KA for PDF sync completion (runs async, typically 30–60 min)...")
+MAX_POLLS = 90   # 1 poll per minute
+synced    = False
+
+for i in range(MAX_POLLS):
+    time.sleep(60)
+    try:
+        src_data = w.api_client.do("GET", f"/api/2.1/{ka_name}/knowledge-sources")
+        sources  = src_data.get("knowledge_sources", [])
+        # Find our source by name or path
+        source = next(
+            (s for s in sources if s.get("name") == source_name
+             or (s.get("files") or {}).get("path") == VOLUME_PATH),
+            None
+        )
+        if source:
+            state   = source.get("state", "")
+            ingest  = source.get("ingestion_details") or {}
+            success = ingest.get("success_file_count", "?")
+            total   = ingest.get("total_file_count",   "?")
+            vectors = ingest.get("vector_count",       "?")
+            print(f"  [{i+1} min] state: {state} — {success}/{total} files, {vectors} vectors")
+            if state == "UPDATED":
+                detail = f"{success}/{total} files indexed · {vectors} vectors"
+                _merge_sync_status("COMPLETED", detail)
+                print(f"\nbootstrap_status: ka_source_sync → COMPLETED")
+                synced = True
+                break
+            elif state == "FAILED":
+                _merge_sync_status("FAILED", "PDF indexing failed — check KA in Databricks UI")
+                print("bootstrap_status: ka_source_sync → FAILED")
+                break
+        else:
+            print(f"  [{i+1} min] source not yet visible — waiting...")
+    except Exception as e:
+        print(f"  [{i+1} min] poll error: {e}")
+
+if not synced:
+    _merge_sync_status("WARNING",
+        "PDF indexing may still be running — refresh the Setup page to check")
+    print("bootstrap_status: ka_source_sync → WARNING (timed out after 90 min)")
