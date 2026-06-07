@@ -14,7 +14,9 @@
 #   6. Deploy app          — create if needed, wait for ACTIVE, then apps deploy
 #
 #   Phase 2 — Finalise
-#   7. Read app SP + grant permissions (warehouse · KA · VS endpoint)
+#   7. Read app SP + grant ALL permissions:
+#        Infrastructure: warehouse · KA · VS endpoint · Genie Space
+#        Unity Catalog:  schema · tables · volume · SELECT/MODIFY grants  (setup_schema.py)
 #   8. DAB deploy          — creates jobs WITH app SP permissions from workflows.yml
 #
 # Job names: [dev <username>] <data_setup_job_name | ai_setup_job_name>
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --schema)            SCHEMA="$2";            shift 2 ;;
     --warehouse-name)    WAREHOUSE_NAME="$2";    shift 2 ;;
     --ka-display-name)   KA_DISPLAY_NAME="$2";   shift 2 ;;
+    --genie-space-name)  GENIE_SPACE_NAME="$2";  shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -116,13 +119,15 @@ _resource_vars=$(python3 "${SCRIPT_DIR}/setup_resources.py" \
     --schema            "$SCHEMA" \
     --warehouse-name    "$WAREHOUSE_NAME" \
     --ka-display-name   "$KA_DISPLAY_NAME" \
-    --vs-endpoint-name  "$VS_ENDPOINT_NAME")
+    --vs-endpoint-name  "$VS_ENDPOINT_NAME" \
+    --genie-space-name  "$GENIE_SPACE_NAME")
 eval "$_resource_vars"
 
 echo ""
 _ok "Warehouse ID:   $WAREHOUSE_ID"
 _ok "KA endpoint:    $KA_ENDPOINT_NAME"
 _ok "VS endpoint:    $VS_ENDPOINT_NAME"
+_ok "Genie Space:    $GENIE_SPACE_ID"
 _elapsed
 echo ""
 
@@ -154,6 +159,8 @@ env:
     value: "${AI_SETUP_JOB_NAME}"
   - name: VS_ENDPOINT_NAME
     value: "${VS_ENDPOINT_NAME}"
+  - name: GENIE_SPACE_ID
+    value: "${GENIE_SPACE_ID}"
 
 resources:
   - name: sql-warehouse
@@ -275,6 +282,23 @@ databricks api patch "/api/2.0/permissions/vector-search-endpoints/${VS_ENDPOINT
   > /dev/null
 _ok "VS endpoint   → CAN_USE ($VS_ENDPOINT_NAME)"
 
+_log "Granting Genie Space CAN_RUN..."
+databricks permissions update genie "$GENIE_SPACE_ID" \
+  --profile="$PROFILE" \
+  --json "{\"access_control_list\": [{\"service_principal_name\": \"$APP_SP_CLIENT_ID\", \"permission_level\": \"CAN_RUN\"}]}" \
+  > /dev/null
+_ok "Genie Space   → CAN_RUN ($GENIE_SPACE_ID)"
+
+# ── Unity Catalog: create schema + tables + grant UC permissions ──────────────
+_log "Creating schema, tables and granting Unity Catalog permissions..."
+python3 "${SCRIPT_DIR}/setup_schema.py" \
+    --profile      "$PROFILE" \
+    --catalog      "$CATALOG" \
+    --schema       "$SCHEMA" \
+    --warehouse-id "$WAREHOUSE_ID" \
+    --app-sp-id    "$APP_SP_CLIENT_ID"
+_ok "Schema, tables and UC grants complete"
+
 _log "Job permissions will be set by DAB deploy in Step 8"
 _elapsed
 echo ""
@@ -293,6 +317,7 @@ databricks bundle deploy \
   --var="ai_setup_job_name=$AI_SETUP_JOB_NAME" \
   --var="app_service_principal=$APP_SP_CLIENT_ID" \
   --var="vs_endpoint_name=$VS_ENDPOINT_NAME" \
+  --var="genie_space_id=$GENIE_SPACE_ID" \
   --profile="$PROFILE"
 _ok "Jobs created with app SP permissions"
 _elapsed

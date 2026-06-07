@@ -72,6 +72,7 @@ def _api_post(path: str, body: dict) -> dict:
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
+
 # ---------------------------------------------------------------------------
 # Warehouse
 # ---------------------------------------------------------------------------
@@ -244,32 +245,81 @@ def resolve_vs_endpoint(endpoint_name: str, catalog: str, schema: str) -> tuple[
 
 
 # ---------------------------------------------------------------------------
+# Genie Space
+# ---------------------------------------------------------------------------
+def resolve_genie_space(space_name: str, warehouse_id: str) -> str:
+    if not space_name:
+        print("ERROR: genie_space_name not set in databricks.yml. Cannot deploy.", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if a space with this name already exists
+    _info(f"Looking up Genie Space by name: '{space_name}'")
+    try:
+        result = subprocess.run(
+            ["databricks", "genie", "list-spaces",
+             f"--profile={PROFILE}", "--output=json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            import json as _json
+            data   = _json.loads(result.stdout)
+            spaces = data if isinstance(data, list) else data.get("spaces", [])
+            match  = next((s for s in spaces if s.get("title") == space_name), None)
+            if match:
+                space_id = match.get("space_id") or match.get("id", "")
+                _info(f"✔ Genie Space found: {space_id}")
+                return space_id
+    except Exception as e:
+        _info(f"  Could not list Genie Spaces: {e}")
+
+    # Create with title and description in a single call
+    _info(f"Creating Genie Space: '{space_name}'")
+    data = _api_post("/api/2.0/genie/spaces", {
+        "title":           space_name,
+        "description":     (
+            "AI analytics assistant for patient clinical data, ICD-10 code analysis, "
+            "care gap findings, and evidence-based care gap rules."
+        ),
+        "warehouse_id":    warehouse_id,
+        "serialized_space": json.dumps({"version": 1}),
+    })
+    space_id = data.get("space_id") or data.get("id", "")
+    _info(f"✔ Genie Space created: {space_id}")
+    _info("  Tables will be registered by Job 1 Task 5 (configure_genie_space)")
+    return space_id
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
     global PROFILE
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile",          default="DEFAULT",           help="Databricks CLI profile")
-    parser.add_argument("--catalog",          required=True,               help="Unity Catalog name")
-    parser.add_argument("--schema",           required=True,               help="Schema name")
-    parser.add_argument("--warehouse-name",   default="",                  help="SQL warehouse name (created if not found; error if empty)")
-    parser.add_argument("--ka-display-name",  default="",                  help="KA display name (created if not found)")
-    parser.add_argument("--vs-endpoint-name", default="rag_pdf_vs_endpoint", help="VS endpoint name (created if not found)")
+    parser.add_argument("--profile",           default="DEFAULT",            help="Databricks CLI profile")
+    parser.add_argument("--catalog",           required=True,                help="Unity Catalog name")
+    parser.add_argument("--schema",            required=True,                help="Schema name")
+    parser.add_argument("--warehouse-name",    default="",                   help="SQL warehouse name (created if not found; error if empty)")
+    parser.add_argument("--ka-display-name",   default="",                   help="KA display name (created if not found)")
+    parser.add_argument("--vs-endpoint-name",  default="rag_pdf_vs_endpoint", help="VS endpoint name (created if not found)")
+    parser.add_argument("--genie-space-name",  default="",                   help="Genie Space display name (created if not found)")
     args = parser.parse_args()
 
     PROFILE = args.profile
 
     print("Resolving infrastructure resources...", file=sys.stderr)
 
-    print("\n[1/3] SQL Warehouse", file=sys.stderr)
+    print("\n[1/4] SQL Warehouse", file=sys.stderr)
     warehouse_id = resolve_warehouse(args.warehouse_name)
 
-    print("\n[2/3] Knowledge Assistant Endpoint", file=sys.stderr)
+    print("\n[2/4] Knowledge Assistant Endpoint", file=sys.stderr)
     ka_endpoint, ka_name = resolve_ka_endpoint(args.ka_display_name)
 
-    print("\n[3/3] Vector Search Endpoint", file=sys.stderr)
+    print("\n[3/4] Vector Search Endpoint", file=sys.stderr)
     vs_endpoint, vs_index = resolve_vs_endpoint(args.vs_endpoint_name, args.catalog, args.schema)
+
+    print("\n[4/4] Genie Space", file=sys.stderr)
+    genie_space_id = resolve_genie_space(args.genie_space_name, warehouse_id)
 
     print("\n✔ All resources resolved\n", file=sys.stderr)
 
@@ -278,6 +328,7 @@ def main() -> None:
     print(f'KA_ENDPOINT_NAME="{ka_endpoint}"')
     print(f'KA_NAME="{ka_name}"')
     print(f'VS_ENDPOINT_NAME="{vs_endpoint}"')
+    print(f'GENIE_SPACE_ID="{genie_space_id}"')
 
 
 if __name__ == "__main__":
