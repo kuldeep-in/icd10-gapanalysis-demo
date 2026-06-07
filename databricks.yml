@@ -4,14 +4,10 @@ bundle:
 variables:
   catalog:
     default: <>
-    description: Unity Catalog name
   schema:
-    default: <>
-    description: Schema name (single schema used for all tables and the icd10_reference_pdfs volume)
-  warehouse_id:
-    default: ""
-    description: >
-      SQL warehouse ID used by the Databricks App for Delta queries. Referenced in app/app.yaml resources block — databricks apps deploy automatically grants the app SP CAN_USE on this warehouse.
+    default: icd10_care_gap
+  warehouse_name:
+    default: "icd10-gap-demo-warehouse"
   data_setup_job_name:
     default: "ICD-10 Gap — Data Setup"
     description: Job 1 — catalog creation + patient data + PDF upload (standard cluster, FUSE mounts)
@@ -22,20 +18,17 @@ variables:
     default: ""
     description: >
       Application ID (client_id UUID) of the Databricks App service principal. Do not hardcode — deploy.sh reads this from the live app after apps deploy.
-      Pass via: databricks bundle deploy --var="app_service_principal=$(databricks apps get icd10-gap-advisor ... | jq -r .service_principal_client_id)"
   fmapi_endpoint:
     default: "databricks-claude-sonnet-4-6"
     description: Databricks Foundation Model API endpoint used by the Care Gap Advisor.
   vs_endpoint_name:
     default: "caregap_rules_vs_endpoint"
     description: >
-      Databricks Vector Search endpoint used for care gap rule retrieval.
-      Must be ONLINE before running Job 1. rag_pdf_vs_endpoint is pre-existing on fevm01.
+      Databricks Vector Search endpoint used for care gap rule retrieval. Must be ONLINE before running Job 1. rag_pdf_vs_endpoint is pre-existing on fevm01.
   ka_display_name:
-    default: "ICD-10 Clinical Reference Assistant"
+    default: "ICD-10 Clinical Assistant"
     description: >
-      Display name of the Knowledge Assistant to use. setup_resources.py looks this up at deploy time, finds or creates the KA,
-      and resolves the serving endpoint name automatically.
+      Display name of the Knowledge Assistant to use. setup_resources.py looks this up at deploy time, finds or creates the KA, and resolves the serving endpoint name automatically.
   ka_endpoint_name:
     default: ""
     description: >
@@ -44,6 +37,20 @@ variables:
     default: ""
     description: >
       Resource name of the Knowledge Assistant (knowledge-assistants/<uuid> format). Always resolved at deploy time by setup_resources.py — never set manually.
+  genie_space_name:
+    default: "Patient Clinical Analysis"
+    description: >
+      Display name of the Genie Space. setup_resources.py looks it up by this name and creates it if not found. Output GENIE_SPACE_ID is written to app.yaml and
+      passed as a parameter to Job 1 task 5 (configure_genie_space).
+  genie_space_id:
+    default: ""
+    description: >
+      Genie Space ID — resolved at deploy time by setup_resources.py. Never set manually.
+  app_name:
+    default: "icd10-gap-advisor"
+    description: >
+      Databricks App name. Used by deploy.sh to create/update the app and read its service principal.
+      Change this if deploying multiple instances side-by-side.
   pdf_github_url:
     default: "https://github.com/kuldeep-in/icd10-gapanalysis-demo/tree/main/data/icd10_pdfs"
     description: >
@@ -57,7 +64,6 @@ targets:
 
 sync:
   exclude:
-    - app/**          # deployed via 'databricks apps deploy', not bundle sync
     - data/**         # data files belong in UC Volume, not local filesystem
     - "*.md"          # documentation files
     - .gitignore

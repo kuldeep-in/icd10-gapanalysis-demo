@@ -5,26 +5,28 @@ command: ["python", "app.py"]
 
 env:
   - name: UC_CATALOG
-    value: ""
+    value: "<>"
   - name: UC_SCHEMA
-    value: ""
+    value: "<>"
   - name: DATABRICKS_WAREHOUSE_ID
-    value: ""
+    value: "<>"
   - name: FMAPI_ENDPOINT
-    value: "databricks-claude-sonnet-4-6"
+    value: "<>"
   - name: KA_ENDPOINT_NAME
-    value: ""
+    value: "<>"
   - name: KA_NAME
-    value: "knowledge-assistants/000000000-aaaaa-0000"
+    value: "<>"
   - name: DATA_SETUP_JOB_NAME
     value: "ICD-10 Gap — Data Setup"
   - name: AI_SETUP_JOB_NAME
     value: "ICD-10 Gap — KA Setup"
   - name: VS_ENDPOINT_NAME
     value: "caregap_rules_vs_endpoint"
+  - name: GENIE_SPACE_ID
+    value: "<>"
 
 resources:
   - name: sql-warehouse
     sql_warehouse:
-      id: ""
+      id: "<>"
       permission: "CAN_USE"
