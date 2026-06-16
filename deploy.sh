@@ -81,17 +81,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Step 2: Derive workspace file path from bundle configuration ──────────────
-_log "Resolving workspace path from bundle..."
+# ── Step 2: Derive workspace file path ───────────────────────────────────────
+_log "Resolving workspace path..."
+# Try bundle validate first (works when file_path is explicit in databricks.yml)
 WORKSPACE_FILE_PATH=$(
   cd "$SCRIPT_DIR" && \
   databricks bundle validate --profile="$PROFILE" --output=json 2>/dev/null \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('workspace',{}).get('file_path',''))"
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('workspace',{}).get('file_path',''))" 2>/dev/null
 )
+# Fallback: compute the DAB default path from current user
 if [ -z "$WORKSPACE_FILE_PATH" ]; then
-  echo "ERROR: Could not resolve workspace.file_path from databricks.yml."
-  echo "  Ensure you are authenticated and workspace.host is set in databricks.yml."
-  exit 1
+  CURRENT_USER_EMAIL=$(databricks current-user me --profile="$PROFILE" --output=json 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))" 2>/dev/null)
+  if [ -n "$CURRENT_USER_EMAIL" ]; then
+    WORKSPACE_FILE_PATH="/Workspace/Users/${CURRENT_USER_EMAIL}/.bundle/icd10-gapanalysis-demo/dev/files"
+    _log "Using default bundle path for user: $CURRENT_USER_EMAIL"
+  else
+    echo "ERROR: Could not resolve workspace path. Ensure workspace.host is set in databricks.yml."
+    exit 1
+  fi
 fi
 APP_SOURCE_PATH="${WORKSPACE_FILE_PATH}/app"
 _ok "Workspace path resolved"

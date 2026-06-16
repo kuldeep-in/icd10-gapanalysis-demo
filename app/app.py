@@ -372,11 +372,13 @@ app.index_string = f"""<!DOCTYPE html>
 """
 server = app.server
 
-import tab_home      # noqa: E402
-import tab_icd10     # noqa: E402
-import tab_caregap   # noqa: E402
-import tab_setup     # noqa: E402
-import tab_genie     # noqa: E402
+import tab_home             # noqa: E402
+import tab_icd10            # noqa: E402
+import tab_caregap          # noqa: E402
+import tab_setup            # noqa: E402
+import tab_genie            # noqa: E402
+import tab_knowledge_graph  # noqa: E402
+import tab_permissions      # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Navbar
@@ -412,6 +414,18 @@ NAVBAR = dbc.Navbar(
                 [html.I(id="navbar-setup-icon", className="fa-solid fa-gear fa-xl"),
                  html.Span("Setup")],
                 id="nav-setup-btn", n_clicks=0,
+                className="nav-btn-inactive",
+            ),
+            html.Button(
+                [html.I(className="fa-solid fa-diagram-project fa-xl"),
+                 html.Span("Graph")],
+                id="nav-kg-btn", n_clicks=0,
+                className="nav-btn-inactive",
+            ),
+            html.Button(
+                [html.I(className="fa-solid fa-shield-halved fa-xl"),
+                 html.Span("Access")],
+                id="nav-perms-btn", n_clicks=0,
                 className="nav-btn-inactive",
             ),
         ], className="ms-auto d-flex align-items-center gap-1"),
@@ -553,12 +567,16 @@ def nav_to_demo(n):
     Output("active-tab-store",  "data",  allow_duplicate=True),
     Input("nav-icd10-btn",      "n_clicks"),
     Input("nav-caregap-btn",    "n_clicks"),
+    Input("nav-kg-btn",         "n_clicks"),
+    Input("nav-perms-btn",      "n_clicks"),
     prevent_initial_call=True,
 )
-def nav_to_tab(icd10_n, caregap_n):
+def nav_to_tab(icd10_n, caregap_n, kg_n, perms_n):
     triggered = callback_context.triggered_id
-    if triggered == "nav-icd10-btn"   and icd10_n:   return "demo", "tab-icd10"
+    if triggered == "nav-icd10-btn"   and icd10_n:  return "demo", "tab-icd10"
     if triggered == "nav-caregap-btn" and caregap_n: return "demo", "tab-caregap"
+    if triggered == "nav-kg-btn"      and kg_n:     return "demo", "tab-kg"
+    if triggered == "nav-perms-btn"   and perms_n:  return "demo", "tab-perms"
     return dash.no_update, dash.no_update
 
 
@@ -615,6 +633,8 @@ def update_navbar_icon(all_done):
     Output("nav-icd10-btn",   "className"),
     Output("nav-caregap-btn", "className"),
     Output("nav-setup-btn",   "className"),
+    Output("nav-kg-btn",      "className"),
+    Output("nav-perms-btn",   "className"),
     Input("active-tab-store", "data"),
     Input("active-page-store","data"),
 )
@@ -627,6 +647,8 @@ def update_nav_active(active_tab, active_page):
         a if (active_tab == "tab-icd10"   and not on_setup) else i,
         a if (active_tab == "tab-caregap" and not on_setup) else i,
         a if on_setup else i,
+        a if (active_tab == "tab-kg"      and not on_setup) else i,
+        a if (active_tab == "tab-perms"   and not on_setup) else i,
     )
 
 
@@ -746,6 +768,12 @@ def render_tab(active_tab, patients, ka_endpoint, all_done, catalog, schema,
             restore_patient=gap_patient,
             restore_gaps=gap_results,
             restore_saved_findings=gap_saved_findings)
+
+    if active_tab == "tab-kg":
+        return tab_knowledge_graph.kg_layout()
+
+    if active_tab == "tab-perms":
+        return tab_permissions.perms_layout()
 
     return html.Div()
 
